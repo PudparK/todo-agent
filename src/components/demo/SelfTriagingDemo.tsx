@@ -4,9 +4,6 @@ import {
   Disclosure,
   DisclosureButton,
   DisclosurePanel,
-  Dialog,
-  DialogPanel,
-  DialogTitle,
   Transition,
 } from '@headlessui/react'
 import {
@@ -216,6 +213,7 @@ type NarrativeHeader = {
   subtitle: string
 }
 type TaskFocusTone = 'neutral' | 'escalate' | 'monitor' | 'stable'
+type BoardRevealQueue = Partial<Record<TaskStatus, string[]>>
 
 const emptyUsageSummary: AiUsageSummary = {
   aiCalls: 0,
@@ -234,12 +232,14 @@ const INCIDENT_STAGGER_MIN_MS = 1100
 const INCIDENT_STAGGER_MAX_MS = 1500
 const DECISION_STAGGER_MS = 850
 const ACTION_STAGGER_MS = 850
+const BOARD_REVEAL_BEFORE_SIGNAL_MS = 1000
+const BOARD_REVEAL_BEFORE_EVALUATION_MS = 550
+const TIMELINE_PULSE_MS = 750
 const INCIDENT_BURST_MIN = 5
 const INCIDENT_BURST_MAX = 7
 const basePillClass =
   'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium'
-const subtlePillClass =
-  'inline-flex items-center rounded-full px-2 text-xs'
+const subtlePillClass = 'inline-flex items-center rounded-full px-2 text-xs'
 const narrativeCopy = {
   monitoring: {
     headerTitle: 'Monitoring system state...',
@@ -284,6 +284,14 @@ function buildDerivedSnapshot(
   }
 }
 
+function buildBoardRevealQueue(tasks: DemoTask[]) {
+  return tasks.reduce<BoardRevealQueue>((queue, task) => {
+    const current = queue[task.status] ?? []
+    queue[task.status] = [...current, task.id]
+    return queue
+  }, {})
+}
+
 function selectFirstSignalForTask(nextSnapshot: DemoSnapshot, taskId: string) {
   return (
     nextSnapshot.signals.find((signal) => signal.taskId === taskId)?.id ??
@@ -316,6 +324,7 @@ function applyRandomIncidents(
 ) {
   const nextTasks = tasks.map((task) => ({ ...task }))
   const incidentMessages: string[] = []
+  const incidentEvents: Array<{ message: string; taskId: string }> = []
   const randomTask = (
     predicate: (task: DemoTask) => boolean,
     excludedIds = new Set<string>(),
@@ -345,38 +354,54 @@ function applyRandomIncidents(
   for (const incidentType of incidentTypes) {
     if (incidentType === 'missing_owner') {
       const target =
-        randomTask((task) => task.status !== 'done' && task.owner !== null, usedTaskIds) ??
-        randomTask((task) => task.status !== 'done', usedTaskIds)
+        randomTask(
+          (task) => task.status !== 'done' && task.owner !== null,
+          usedTaskIds,
+        ) ?? randomTask((task) => task.status !== 'done', usedTaskIds)
 
       if (!target) continue
       target.owner = null
-      if (Math.random() < 0.45 && (target.priority === 'P2' || target.priority === 'P3')) {
+      if (
+        Math.random() < 0.45 &&
+        (target.priority === 'P2' || target.priority === 'P3')
+      ) {
         target.priority = Math.random() < 0.5 ? 'P1' : 'P0'
       }
       target.ageLabel = 'Owner dropped just now'
       usedTaskIds.add(target.id)
-      incidentMessages.push(
+      const message =
         target.priority === 'P0'
           ? `Overdue task with no assigned owner: ${target.title}`
-          : `Task has no assigned owner: ${target.title}`,
-      )
+          : `Task has no assigned owner: ${target.title}`
+      incidentMessages.push(message)
+      incidentEvents.push({ message, taskId: target.id })
       continue
     }
 
     if (incidentType === 'task_overdue') {
       const target =
-        randomTask((task) => task.status !== 'done' && task.dueInDays !== null, usedTaskIds) ??
-        randomTask((task) => task.status !== 'done', usedTaskIds)
+        randomTask(
+          (task) => task.status !== 'done' && task.dueInDays !== null,
+          usedTaskIds,
+        ) ?? randomTask((task) => task.status !== 'done', usedTaskIds)
 
       if (!target) continue
       target.dueInDays = -1 - Math.floor(Math.random() * 4)
-      target.daysInStatus = Math.max(target.daysInStatus, 8 + Math.floor(Math.random() * 4))
-      if (Math.random() < 0.5 && (target.priority === 'P2' || target.priority === 'P3')) {
+      target.daysInStatus = Math.max(
+        target.daysInStatus,
+        8 + Math.floor(Math.random() * 4),
+      )
+      if (
+        Math.random() < 0.5 &&
+        (target.priority === 'P2' || target.priority === 'P3')
+      ) {
         target.priority = 'P0'
       }
       target.ageLabel = 'Overdue just now'
       usedTaskIds.add(target.id)
-      incidentMessages.push(`Overdue task identified: ${target.title}`)
+      const message = `Overdue task identified: ${target.title}`
+      incidentMessages.push(message)
+      incidentEvents.push({ message, taskId: target.id })
       continue
     }
 
@@ -387,15 +412,18 @@ function applyRandomIncidents(
 
       if (!target) continue
       target.status = 'in_progress'
-      target.daysInStatus = Math.max(target.daysInStatus, 10 + Math.floor(Math.random() * 4))
+      target.daysInStatus = Math.max(
+        target.daysInStatus,
+        10 + Math.floor(Math.random() * 4),
+      )
       if (Math.random() < 0.55 && target.priority !== 'P0') {
         target.priority = 'P1'
       }
       target.ageLabel = `${target.daysInStatus}d active`
       usedTaskIds.add(target.id)
-      incidentMessages.push(
-        `Task active for ${target.daysInStatus} days without progress: ${target.title}`,
-      )
+      const message = `Task active for ${target.daysInStatus} days without progress: ${target.title}`
+      incidentMessages.push(message)
+      incidentEvents.push({ message, taskId: target.id })
       continue
     }
 
@@ -418,13 +446,16 @@ function applyRandomIncidents(
     duplicateTarget.title = source.title
     duplicateTarget.ageLabel = 'Duplicate surfaced just now'
     usedTaskIds.add(duplicateTarget.id)
-    incidentMessages.push(`Duplicate task identified in backlog: ${source.title}`)
+    const message = `Duplicate task identified in backlog: ${source.title}`
+    incidentMessages.push(message)
+    incidentEvents.push({ message, taskId: source.id })
   }
 
   return {
     tasks: nextTasks,
     incidentCount: Math.min(incidentTypes.length, incidentCount),
     incidentMessages,
+    incidentEvents,
   }
 }
 
@@ -554,7 +585,10 @@ function getEvidencePillClass(evidenceItem: string) {
   return 'border-zinc-200/65 bg-zinc-100 text-zinc-600 dark:border-zinc-700/35 dark:bg-zinc-900 dark:text-zinc-300'
 }
 
-function buildActivityOutcome(decision: TaskPassDecision, previousTask: DemoTask) {
+function buildActivityOutcome(
+  decision: TaskPassDecision,
+  previousTask: DemoTask,
+) {
   if (decision.changed && decision.nextTask.status !== previousTask.status) {
     const nextStatusLabel =
       decision.nextTask.status === 'in_progress'
@@ -601,16 +635,18 @@ function buildTaskInsightContext({
   const task = findTaskById(snapshot, taskId)
   const signals = snapshot.signals.filter(
     (signal) =>
-      signal.taskId === taskId || (signal.relatedTaskIds ?? []).includes(taskId),
+      signal.taskId === taskId ||
+      (signal.relatedTaskIds ?? []).includes(taskId),
   )
   const primarySignal =
-    signals.find((signal) => signal.id === selectedSignalId) ?? signals[0] ?? null
-  const primaryTriage = primarySignal
-    ? effectiveTriage[primarySignal.id]
-    : null
+    signals.find((signal) => signal.id === selectedSignalId) ??
+    signals[0] ??
+    null
+  const primaryTriage = primarySignal ? effectiveTriage[primarySignal.id] : null
   const primaryAction = primarySignal
-    ? snapshot.actions.find((action) => action.signalId === primarySignal.id) ??
-      null
+    ? (snapshot.actions.find(
+        (action) => action.signalId === primarySignal.id,
+      ) ?? null)
     : null
 
   return {
@@ -630,7 +666,11 @@ function buildSignalSummary(insightContext: TaskInsightContext) {
     return 'No signals detected'
   }
 
-  return insightContext.primarySignal?.title ?? insightContext.signals[0]?.title ?? 'Signal detected'
+  return (
+    insightContext.primarySignal?.title ??
+    insightContext.signals[0]?.title ??
+    'Signal detected'
+  )
 }
 
 function buildDecisionSummary(insightContext: TaskInsightContext) {
@@ -734,16 +774,20 @@ function getChangedTaskSnapshotFields(
   before: TaskStateSnapshot,
   after: TaskStateSnapshot,
 ) {
-  return (Object.keys(after) as Array<keyof TaskStateSnapshot>).filter((key) => {
-    const beforeValue = before[key]
-    const afterValue = after[key]
+  return (Object.keys(after) as Array<keyof TaskStateSnapshot>).filter(
+    (key) => {
+      const beforeValue = before[key]
+      const afterValue = after[key]
 
-    if (Array.isArray(beforeValue) || Array.isArray(afterValue)) {
-      return JSON.stringify(beforeValue ?? []) !== JSON.stringify(afterValue ?? [])
-    }
+      if (Array.isArray(beforeValue) || Array.isArray(afterValue)) {
+        return (
+          JSON.stringify(beforeValue ?? []) !== JSON.stringify(afterValue ?? [])
+        )
+      }
 
-    return beforeValue !== afterValue
-  })
+      return beforeValue !== afterValue
+    },
+  )
 }
 
 function getVisibleTaskSnapshotFields(
@@ -757,7 +801,9 @@ function getVisibleTaskSnapshotFields(
     fields.add(field)
   }
 
-  return (['status', 'owner', 'priority', 'tags'] as Array<keyof TaskStateSnapshot>)
+  return (
+    ['status', 'owner', 'priority', 'tags'] as Array<keyof TaskStateSnapshot>
+  )
     .filter((field) => fields.has(field))
     .slice(0, 5)
 }
@@ -919,37 +965,115 @@ function buildEvaluatingNarrativeEntry() {
   )
 }
 
-function getTimelineEventToneClasses(entry: TimelineEvent, isSelected: boolean) {
+function getActionEventVisualTone(entry: TimelineEvent) {
+  if (entry.type !== 'action') {
+    return 'neutral' as const
+  }
+
+  const actionType = entry.eventAction?.type
+
+  if (actionType === 'escalated' || entry.decisionTone === 'escalate') {
+    return 'escalate' as const
+  }
+
+  if (actionType === 'ignored' || entry.title.includes('No change')) {
+    return 'neutral' as const
+  }
+
+  return 'stable' as const
+}
+
+function getTimelineEventVisualTone(entry: TimelineEvent) {
+  if (entry.type === 'signal') {
+    return 'signal' as const
+  }
+
+  if (entry.type === 'evaluating') {
+    return 'evaluating' as const
+  }
+
+  if (entry.type === 'decision') {
+    return 'decision' as const
+  }
+
+  if (entry.type === 'action') {
+    return getActionEventVisualTone(entry)
+  }
+
+  return 'neutral' as const
+}
+
+function getTimelineEventGlowClasses(
+  entry: TimelineEvent,
+  isSelected: boolean,
+) {
+  if (!isSelected) {
+    return 'shadow-[0_0_18px_-12px_rgba(15,23,42,0.3)] dark:shadow-[0_0_24px_-14px_rgba(0,0,0,0.65)]'
+  }
+
+  const tone = getTimelineEventVisualTone(entry)
+
+  if (tone === 'signal') {
+    return 'shadow-[0_0_34px_-10px_rgba(245,158,11,0.38)] dark:shadow-[0_0_38px_-12px_rgba(245,158,11,0.3)]'
+  }
+
+  if (tone === 'evaluating') {
+    return 'shadow-[0_0_34px_-10px_rgba(59,130,246,0.32)] dark:shadow-[0_0_38px_-12px_rgba(59,130,246,0.26)]'
+  }
+
+  if (tone === 'decision') {
+    return 'shadow-[0_0_34px_-10px_rgba(99,102,241,0.32)] dark:shadow-[0_0_38px_-12px_rgba(99,102,241,0.26)]'
+  }
+
+  if (tone === 'escalate') {
+    return 'shadow-[0_0_36px_-10px_rgba(239,68,68,0.34)] dark:shadow-[0_0_40px_-12px_rgba(239,68,68,0.28)]'
+  }
+
+  if (tone === 'stable') {
+    return 'shadow-[0_0_36px_-10px_rgba(34,197,94,0.32)] dark:shadow-[0_0_40px_-12px_rgba(34,197,94,0.26)]'
+  }
+
+  return 'shadow-[0_0_30px_-10px_rgba(113,113,122,0.28)] dark:shadow-[0_0_34px_-12px_rgba(24,24,27,0.62)]'
+}
+
+function getTimelineEventToneClasses(
+  entry: TimelineEvent,
+  isSelected: boolean,
+) {
   const base =
     entry.type === 'signal'
       ? isSelected
-        ? 'border-amber-300 bg-white ring-2 ring-amber-200/45 dark:border-amber-500/28 dark:bg-zinc-950 dark:ring-amber-500/14'
+        ? 'border-amber-300/95 bg-white dark:border-amber-400/40 dark:bg-zinc-950'
         : 'border-amber-200/65 bg-white dark:border-amber-500/18 dark:bg-zinc-950'
       : entry.type === 'evaluating'
         ? isSelected
-          ? 'border-blue-300 bg-white ring-2 ring-blue-200/45 dark:border-blue-500/28 dark:bg-zinc-950 dark:ring-blue-500/14'
+          ? 'border-blue-300/95 bg-white dark:border-blue-400/40 dark:bg-zinc-950'
           : 'border-blue-200/65 bg-white dark:border-blue-500/18 dark:bg-zinc-950'
         : entry.type === 'decision'
           ? isSelected
-            ? 'border-indigo-300 bg-white ring-2 ring-indigo-200/45 dark:border-indigo-500/28 dark:bg-zinc-950 dark:ring-indigo-500/14'
+            ? 'border-indigo-300/95 bg-white dark:border-indigo-400/40 dark:bg-zinc-950'
             : 'border-indigo-200/65 bg-white dark:border-indigo-500/18 dark:bg-zinc-950'
           : entry.type === 'action'
-            ? entry.decisionTone === 'escalate'
+            ? getActionEventVisualTone(entry) === 'escalate'
               ? isSelected
-                ? 'border-red-300 bg-white ring-2 ring-red-200/45 dark:border-red-500/28 dark:bg-zinc-950 dark:ring-red-500/14'
+                ? 'border-red-300/95 bg-white dark:border-red-400/40 dark:bg-zinc-950'
                 : 'border-red-200/65 bg-white dark:border-red-500/18 dark:bg-zinc-950'
-              : isSelected
-                ? 'border-green-300 bg-white ring-2 ring-green-200/45 dark:border-green-500/28 dark:bg-zinc-950 dark:ring-green-500/14'
-                : 'border-green-200/65 bg-white dark:border-green-500/18 dark:bg-zinc-950'
+              : getActionEventVisualTone(entry) === 'stable'
+                ? isSelected
+                  ? 'border-green-300/95 bg-white dark:border-green-400/40 dark:bg-zinc-950'
+                  : 'border-green-200/65 bg-white dark:border-green-500/18 dark:bg-zinc-950'
+                : isSelected
+                  ? 'border-zinc-300/95 bg-white dark:border-zinc-500/45 dark:bg-zinc-950'
+                  : 'border-zinc-300/75 bg-white dark:border-zinc-500/28 dark:bg-zinc-950'
             : entry.type === 'complete'
               ? isSelected
-                ? 'border-zinc-300 bg-white ring-2 ring-zinc-300/45 dark:border-zinc-500/35 dark:bg-zinc-950 dark:ring-zinc-500/16'
+                ? 'border-zinc-300/95 bg-white dark:border-zinc-500/45 dark:bg-zinc-950'
                 : 'border-zinc-300/75 bg-white dark:border-zinc-500/28 dark:bg-zinc-950'
               : isSelected
-                ? 'border-zinc-300 bg-white ring-2 ring-zinc-300/45 dark:border-zinc-500/35 dark:bg-zinc-950 dark:ring-zinc-500/16'
+                ? 'border-zinc-300/95 bg-white dark:border-zinc-500/45 dark:bg-zinc-950'
                 : 'border-zinc-200/65 bg-white dark:border-zinc-700/25 dark:bg-zinc-950'
 
-  return `${base} shadow-sm ring-zinc-900/4 dark:ring-white/4`
+  return `${base} ${getTimelineEventGlowClasses(entry, isSelected)}`
 }
 
 function getTimelineEventIcon(entry: TimelineEvent) {
@@ -974,9 +1098,7 @@ function getTimelineEventIcon(entry: TimelineEvent) {
       return FlagIcon
     }
 
-    return entry.title.includes('No change')
-      ? MinusCircleIcon
-      : CheckCircleIcon
+    return entry.title.includes('No change') ? MinusCircleIcon : CheckCircleIcon
   }
 
   return CheckCircleIcon
@@ -1002,9 +1124,11 @@ function getTimelineEventIconClasses(entry: TimelineEvent) {
   }
 
   if (entry.type === 'action') {
-    return entry.decisionTone === 'escalate'
+    return getActionEventVisualTone(entry) === 'escalate'
       ? 'bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-300'
-      : 'bg-green-100 text-green-700 dark:bg-green-500/15 dark:text-green-300'
+      : getActionEventVisualTone(entry) === 'stable'
+        ? 'bg-green-100 text-green-700 dark:bg-green-500/15 dark:text-green-300'
+        : 'bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-200'
   }
 
   if (entry.type === 'complete') {
@@ -1012,6 +1136,26 @@ function getTimelineEventIconClasses(entry: TimelineEvent) {
   }
 
   return 'bg-zinc-100 text-zinc-600 dark:bg-zinc-900 dark:text-zinc-300'
+}
+
+function getTimelineEventFocusTone(entry: TimelineEvent | null): TaskFocusTone {
+  if (!entry) {
+    return 'neutral'
+  }
+
+  if (entry.type === 'action') {
+    if (getActionEventVisualTone(entry) === 'escalate') {
+      return 'escalate'
+    }
+
+    return getActionEventVisualTone(entry)
+  }
+
+  if (entry.type === 'decision' && entry.decisionTone) {
+    return entry.decisionTone
+  }
+
+  return entry.decisionTone ?? 'neutral'
 }
 
 function TimelineEventDetails({
@@ -1023,8 +1167,14 @@ function TimelineEventDetails({
   insightContext: TaskInsightContext
   onSelectSignal: (signalId: string) => void
 }) {
-  const { task, signals, primarySignal, primaryTriage, primaryAction, isAiPending } =
-    insightContext
+  const {
+    task,
+    signals,
+    primarySignal,
+    primaryTriage,
+    primaryAction,
+    isAiPending,
+  } = insightContext
 
   if (entry.type === 'decision') {
     return (
@@ -1160,23 +1310,27 @@ function TimelineEventDetails({
           })()
       : null
   const beforeSnapshot =
-    entry.before ?? projectedActionDiff?.before ?? (entry.previousTask
-      ? captureTaskStateSnapshot(entry.previousTask)
-      : null)
+    entry.before ??
+    projectedActionDiff?.before ??
+    (entry.previousTask ? captureTaskStateSnapshot(entry.previousTask) : null)
   const afterSnapshot =
-    entry.after ?? projectedActionDiff?.after ?? (task ? captureTaskStateSnapshot(task) : null)
+    entry.after ??
+    projectedActionDiff?.after ??
+    (task ? captureTaskStateSnapshot(task) : null)
   const actionTriage = entry.eventTriage ?? {
     suggestedRemediation: primaryTriage?.suggestedRemediation,
     guardrailStatus: primaryTriage?.guardrailStatus,
     guardrailReason: primaryTriage?.guardrailReason,
   }
-  const actionSummary = entry.eventAction ?? (primaryAction
-    ? {
-        type: primaryAction.type,
-        message: primaryAction.message,
-        timestamp: primaryAction.timestamp,
-      }
-    : null)
+  const actionSummary =
+    entry.eventAction ??
+    (primaryAction
+      ? {
+          type: primaryAction.type,
+          message: primaryAction.message,
+          timestamp: primaryAction.timestamp,
+        }
+      : null)
   const diffFields =
     beforeSnapshot && afterSnapshot
       ? getChangedTaskSnapshotFields(beforeSnapshot, afterSnapshot)
@@ -1205,7 +1359,9 @@ function TimelineEventDetails({
                 Why this action happened
               </p>
               {actionTriage.guardrailStatus ? (
-                <DemoBadge color={guardrailBadgeColor[actionTriage.guardrailStatus]}>
+                <DemoBadge
+                  color={guardrailBadgeColor[actionTriage.guardrailStatus]}
+                >
                   {guardrailLabel[actionTriage.guardrailStatus]}
                 </DemoBadge>
               ) : null}
@@ -1339,6 +1495,7 @@ function TimelineEventRow({
   isLast,
   isSelected,
   isRecent,
+  pulseToken,
   shouldScrollIntoView = false,
   insightContext,
   onSelectSignal,
@@ -1348,12 +1505,14 @@ function TimelineEventRow({
   isLast: boolean
   isSelected: boolean
   isRecent: boolean
+  pulseToken?: number | null
   shouldScrollIntoView?: boolean
   insightContext: TaskInsightContext | null
   onSelectSignal: (signalId: string) => void
   onSelectEvent: () => void
 }) {
   const rowRef = useRef<HTMLLIElement | null>(null)
+  const cardRef = useRef<HTMLDivElement | null>(null)
   const isExpandable =
     (entry.type === 'decision' || entry.type === 'action') &&
     insightContext !== null
@@ -1371,59 +1530,65 @@ function TimelineEventRow({
     })
   }, [shouldScrollIntoView])
 
+  useEffect(() => {
+    if (!pulseToken) {
+      return
+    }
+
+    const animation = cardRef.current?.animate(
+      [
+        {
+          transform: 'scale(1)',
+          boxShadow: '0 0 0 rgba(0, 0, 0, 0)',
+        },
+        {
+          transform: 'scale(1.015)',
+          boxShadow: '0 14px 34px rgba(0, 0, 0, 0.12)',
+        },
+        {
+          transform: 'scale(1)',
+          boxShadow: '0 0 0 rgba(0, 0, 0, 0)',
+        },
+      ],
+      {
+        duration: TIMELINE_PULSE_MS,
+        easing: 'ease-out',
+      },
+    )
+
+    return () => {
+      animation?.cancel()
+    }
+  }, [pulseToken])
+
+  const rowCardClass = `transition duration-[750ms] ${getTimelineEventToneClasses(
+    entry,
+    isSelected,
+  )} ${isRecent ? 'demo-flicker-ring' : ''}`
+
   if (!isExpandable) {
     return (
-      <li ref={rowRef}>
-        <div className="relative pb-5">
-          {!isLast ? (
-            <span
-              aria-hidden="true"
-              className="absolute top-8 left-4 h-full w-px bg-zinc-200/75 dark:bg-zinc-800/75"
-            />
-          ) : null}
-          <button
-            type="button"
-            onClick={onSelectEvent}
-            className="relative flex w-full gap-3 text-left"
-          >
-            <span
-              className={`relative z-10 flex h-8 w-8 shrink-0 items-center justify-center rounded-full ring-8 ring-zinc-50/80 dark:ring-zinc-900/60 ${getTimelineEventIconClasses(
-                entry,
-              )}`}
+      <Transition
+        as={Fragment}
+        show={true}
+        appear
+        enter="transition duration-1000 ease-out"
+        enterFrom="opacity-0"
+        enterTo="opacity-100"
+      >
+        <li ref={rowRef}>
+          <div className="relative pb-5">
+            {!isLast ? (
+              <span
+                aria-hidden="true"
+                className="absolute top-8 left-4 h-full w-px bg-zinc-200/75 dark:bg-zinc-800/75"
+              />
+            ) : null}
+            <button
+              type="button"
+              onClick={onSelectEvent}
+              className="relative flex w-full gap-3 text-left"
             >
-              {renderTimelineEventIcon(entry)}
-            </span>
-            <div
-              className={`min-w-0 flex-1 rounded-2xl border p-4 transition ${getTimelineEventToneClasses(
-                entry,
-                isSelected,
-              )} ${isRecent ? 'demo-flicker-ring' : ''}`}
-            >
-              <p className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
-                {entry.title}
-              </p>
-              <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-                {entry.description}
-              </p>
-            </div>
-          </button>
-        </div>
-      </li>
-    )
-  }
-
-  return (
-    <li ref={rowRef}>
-      <div className="relative pb-5">
-        {!isLast ? (
-          <span
-            aria-hidden="true"
-            className="absolute top-8 left-4 h-full w-px bg-zinc-200/75 dark:bg-zinc-800/75"
-          />
-        ) : null}
-        <Disclosure defaultOpen={isSelected} as="div" className="relative flex gap-3">
-          {({ open }) => (
-            <>
               <span
                 className={`relative z-10 flex h-8 w-8 shrink-0 items-center justify-center rounded-full ring-8 ring-zinc-50/80 dark:ring-zinc-900/60 ${getTimelineEventIconClasses(
                   entry,
@@ -1432,42 +1597,92 @@ function TimelineEventRow({
                 {renderTimelineEventIcon(entry)}
               </span>
               <div
-                className={`min-w-0 flex-1 overflow-hidden rounded-2xl border transition ${getTimelineEventToneClasses(
-                  entry,
-                  isSelected,
-                )} ${isRecent ? 'demo-flicker-ring' : ''}`}
+                ref={cardRef}
+                className={`min-w-0 flex-1 rounded-2xl border p-4 ${rowCardClass}`}
               >
-                <DisclosureButton
-                  onClick={onSelectEvent}
-                  className="group flex w-full items-start justify-between gap-3 px-4 py-4 text-left"
-                >
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
-                      {entry.title}
-                    </p>
-                    <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-                      {entry.description}
-                    </p>
-                  </div>
-                  <ChevronDownIcon
-                    className={`size-5 shrink-0 text-zinc-400 transition duration-200 dark:text-zinc-500 ${
-                      open ? 'rotate-180 text-zinc-600 dark:text-zinc-300' : ''
-                    }`}
-                  />
-                </DisclosureButton>
-                <DisclosurePanel>
-                  <TimelineEventDetails
-                    entry={entry}
-                    insightContext={insightContext}
-                    onSelectSignal={onSelectSignal}
-                  />
-                </DisclosurePanel>
+                <p className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                  {entry.title}
+                </p>
+                <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+                  {entry.description}
+                </p>
               </div>
-            </>
-          )}
-        </Disclosure>
-      </div>
-    </li>
+            </button>
+          </div>
+        </li>
+      </Transition>
+    )
+  }
+
+  return (
+    <Transition
+      as={Fragment}
+      show={true}
+      appear
+      enter="transition duration-1000 ease-out"
+      enterFrom="opacity-0"
+      enterTo="opacity-100"
+    >
+      <li ref={rowRef}>
+        <div className="relative pb-5">
+          {!isLast ? (
+            <span
+              aria-hidden="true"
+              className="absolute top-8 left-4 h-full w-px bg-zinc-200/75 dark:bg-zinc-800/75"
+            />
+          ) : null}
+          <Disclosure
+            defaultOpen={false}
+            as="div"
+            className="relative flex gap-3"
+          >
+            {({ open }) => (
+              <>
+                <span
+                  className={`relative z-10 flex h-8 w-8 shrink-0 items-center justify-center rounded-full ring-8 ring-zinc-50/80 dark:ring-zinc-900/60 ${getTimelineEventIconClasses(
+                    entry,
+                  )}`}
+                >
+                  {renderTimelineEventIcon(entry)}
+                </span>
+                <div
+                  ref={cardRef}
+                  className={`min-w-0 flex-1 overflow-hidden rounded-2xl border ${rowCardClass}`}
+                >
+                  <DisclosureButton
+                    onClick={onSelectEvent}
+                    className="group flex w-full items-start justify-between gap-3 px-4 py-4 text-left"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                        {entry.title}
+                      </p>
+                      <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+                        {entry.description}
+                      </p>
+                    </div>
+                    <ChevronDownIcon
+                      className={`size-5 shrink-0 text-zinc-400 transition duration-200 dark:text-zinc-500 ${
+                        open
+                          ? 'rotate-180 text-zinc-600 dark:text-zinc-300'
+                          : ''
+                      }`}
+                    />
+                  </DisclosureButton>
+                  <DisclosurePanel>
+                    <TimelineEventDetails
+                      entry={entry}
+                      insightContext={insightContext}
+                      onSelectSignal={onSelectSignal}
+                    />
+                  </DisclosurePanel>
+                </div>
+              </>
+            )}
+          </Disclosure>
+        </div>
+      </li>
+    </Transition>
   )
 }
 
@@ -1492,7 +1707,7 @@ function TimelineLoadingRow({
           <div className="min-w-0 flex-1 rounded-2xl border border-zinc-200/65 bg-white p-4 shadow-sm ring-1 ring-zinc-900/4 dark:border-zinc-800/55 dark:bg-zinc-950 dark:ring-white/4">
             {title ? <span className="sr-only">{title}</span> : null}
             {subtitle ? <span className="sr-only">{subtitle}</span> : null}
-            <div className="space-y-2 animate-pulse">
+            <div className="animate-pulse space-y-2">
               <div className="h-4 w-40 rounded bg-zinc-200 dark:bg-zinc-800" />
               <div className="h-3 w-64 max-w-full rounded bg-zinc-100 dark:bg-zinc-900/90" />
               <div className="h-3 w-52 max-w-[85%] rounded bg-zinc-100 dark:bg-zinc-900/90" />
@@ -1505,15 +1720,21 @@ function TimelineLoadingRow({
 }
 
 export function SelfTriagingDemo() {
-  const initialSnapshot = buildDerivedSnapshot(
-    cloneSnapshot(baseDemoSnapshot),
-    'initial',
+  const initialSnapshot = useMemo(
+    () => buildDerivedSnapshot(cloneSnapshot(baseDemoSnapshot), 'initial'),
+    [],
   )
-  const initialSignalId = getFirstSignalId(initialSnapshot)
-  const initialAiTriage =
-    TRIAGE_MODE === 'pseudo'
-      ? buildPseudoSelectionTriage(initialSnapshot, initialSignalId)
-      : {}
+  const initialSignalId = useMemo(
+    () => getFirstSignalId(initialSnapshot),
+    [initialSnapshot],
+  )
+  const initialAiTriage = useMemo(
+    () =>
+      TRIAGE_MODE === 'pseudo'
+        ? buildPseudoSelectionTriage(initialSnapshot, initialSignalId)
+        : {},
+    [initialSignalId, initialSnapshot],
+  )
 
   const [snapshot, setSnapshot] = useState<DemoSnapshot>(initialSnapshot)
   const [selectedSignalId, setSelectedSignalId] =
@@ -1524,23 +1745,31 @@ export function SelfTriagingDemo() {
   const [usageSummary, setUsageSummary] =
     useState<AiUsageSummary>(emptyUsageSummary)
   const [isTriagePassRunning, setIsTriagePassRunning] = useState(false)
+  const [isBoardBooting, setIsBoardBooting] = useState(true)
+  const [visibleBoardTaskIds, setVisibleBoardTaskIds] = useState<string[]>([])
+  const [boardRevealQueue, setBoardRevealQueue] = useState<BoardRevealQueue>(
+    () => buildBoardRevealQueue(initialSnapshot.tasks),
+  )
   const [activeScanTaskId, setActiveScanTaskId] = useState<string | null>(null)
   const [recentlyTriagedTaskIds, setRecentlyTriagedTaskIds] = useState<
     string[]
   >([])
   const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[]>([])
-  const [recentTimelineEventIds, setRecentTimelineEventIds] = useState<string[]>(
-    [],
-  )
+  const [recentTimelineEventIds, setRecentTimelineEventIds] = useState<
+    string[]
+  >([])
   const [selectedTimelineEventId, setSelectedTimelineEventId] = useState<
     string | null
   >(null)
+  const [pulsedTimelineEvent, setPulsedTimelineEvent] = useState<{
+    id: string
+    token: number
+  } | null>(null)
   const [scrollToTimelineEventId, setScrollToTimelineEventId] = useState<
     string | null
   >(null)
-  const [narrativeHeader, setNarrativeHeader] = useState<NarrativeHeader | null>(
-    null,
-  )
+  const [narrativeHeader, setNarrativeHeader] =
+    useState<NarrativeHeader | null>(null)
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
   const [isAiInfoOpen, setIsAiInfoOpen] = useState(false)
   const [isHistoryOpen, setIsHistoryOpen] = useState(false)
@@ -1636,13 +1865,10 @@ export function SelfTriagingDemo() {
   const activeTaskId =
     selectedTimelineEvent?.taskId ??
     selectedTaskId ??
-    selectedSignal?.taskId ??
     null
-  const activeTaskTone: TaskFocusTone = selectedTimelineEvent?.decisionTone
-    ? selectedTimelineEvent.decisionTone
-    : selectedTriage
-      ? decisionToFocusTone[selectedTriage.decision]
-      : 'neutral'
+  const activeTaskTone: TaskFocusTone = selectedTimelineEvent
+    ? getTimelineEventFocusTone(selectedTimelineEvent)
+    : 'neutral'
   const isAnyTriagePending = aiPendingSignalIds.length > 0
 
   const groupedTasks = useMemo(
@@ -1663,7 +1889,37 @@ export function SelfTriagingDemo() {
     setTimelineEvents([])
     setRecentTimelineEventIds([])
     setSelectedTimelineEventId(null)
+    setSelectedTaskId(null)
+    setPulsedTimelineEvent(null)
     setScrollToTimelineEventId(null)
+  }
+
+  function resetBoardRevealState() {
+    setVisibleBoardTaskIds([])
+    setBoardRevealQueue({})
+  }
+
+  function revealBoardTask(taskId: string) {
+    setVisibleBoardTaskIds((current) =>
+      current.includes(taskId) ? current : [...current, taskId],
+    )
+    setBoardRevealQueue((current) => {
+      const nextQueue: BoardRevealQueue = { ...current }
+
+      for (const status of taskStatusOrder) {
+        const queuedIds = nextQueue[status] ?? []
+
+        if (!queuedIds.includes(taskId)) {
+          continue
+        }
+
+        nextQueue[status] = queuedIds.filter(
+          (queuedTaskId) => queuedTaskId !== taskId,
+        )
+      }
+
+      return nextQueue
+    })
   }
 
   function clearNarrativeHeader() {
@@ -1672,9 +1928,9 @@ export function SelfTriagingDemo() {
 
   function appendTimelineEvent(entry: TimelineEvent) {
     setTimelineEvents((current) => [entry, ...current])
-    setSelectedTimelineEventId(entry.id)
-    if (entry.taskId) {
-      setSelectedTaskId(entry.taskId)
+    if (entry.type === 'action') {
+      setSelectedTimelineEventId(entry.id)
+      setSelectedTaskId(entry.taskId ?? null)
     }
     setRecentTimelineEventIds((current) => [...new Set([entry.id, ...current])])
     window.setTimeout(() => {
@@ -1714,8 +1970,7 @@ export function SelfTriagingDemo() {
     return (
       orderedTimelineEvents.find(
         (event) => event.taskId === taskId && event.type !== 'monitoring',
-      ) ??
-      null
+      ) ?? null
     )
   }
 
@@ -2049,6 +2304,9 @@ export function SelfTriagingDemo() {
     setAiPendingSignalIds([])
     setUsageSummary(emptyUsageSummary)
     setActiveScanTaskId(null)
+    setIsBoardBooting(true)
+    setVisibleBoardTaskIds([])
+    setBoardRevealQueue(buildBoardRevealQueue(nextSnapshot.tasks))
     setRecentlyTriagedTaskIds([])
     clearTimeline()
     clearNarrativeHeader()
@@ -2077,6 +2335,9 @@ export function SelfTriagingDemo() {
     setAiPendingSignalIds([])
     setUsageSummary(emptyUsageSummary)
     setActiveScanTaskId(null)
+    setIsBoardBooting(true)
+    setVisibleBoardTaskIds([])
+    setBoardRevealQueue(buildBoardRevealQueue(nextSnapshot.tasks))
     setRecentlyTriagedTaskIds([])
     clearTimeline()
     clearNarrativeHeader()
@@ -2109,6 +2370,9 @@ export function SelfTriagingDemo() {
         : {},
     )
     setAiPendingSignalIds([])
+    setIsBoardBooting(false)
+    setVisibleBoardTaskIds([])
+    setBoardRevealQueue(buildBoardRevealQueue(runStartSnapshot.tasks))
     setActiveScanTaskId(null)
     setRecentlyTriagedTaskIds([])
     setRecentlyChangedTaskIds([])
@@ -2119,6 +2383,7 @@ export function SelfTriagingDemo() {
     setIsTriagePassRunning(true)
     void (async () => {
       let workingTasks = runStartSnapshot.tasks.map((task) => ({ ...task }))
+      const revealedTaskIds = new Set<string>()
       const burstCount = randomBetween(INCIDENT_BURST_MIN, INCIDENT_BURST_MAX)
       let appliedIncidents = 0
       const narrativeDecisions: Array<{
@@ -2145,12 +2410,22 @@ export function SelfTriagingDemo() {
             ...current,
             tasks: workingTasks,
           }))
-          for (const message of randomIncidentResult.incidentMessages) {
+          for (const incidentEvent of randomIncidentResult.incidentEvents) {
+            revealBoardTask(incidentEvent.taskId)
+            revealedTaskIds.add(incidentEvent.taskId)
+            await wait(BOARD_REVEAL_BEFORE_SIGNAL_MS)
+
+            if (contextVersionRef.current !== version) {
+              return
+            }
+
             setNarrativeHeader({
               title: narrativeCopy.signal.title,
-              subtitle: message,
+              subtitle: incidentEvent.message,
             })
-            appendTimelineEvent(buildSignalNarrativeEntry(message))
+            appendTimelineEvent(
+              buildSignalNarrativeEntry(incidentEvent.message),
+            )
           }
         }
 
@@ -2159,6 +2434,20 @@ export function SelfTriagingDemo() {
             randomBetween(INCIDENT_STAGGER_MIN_MS, INCIDENT_STAGGER_MAX_MS),
           )
         }
+      }
+
+      const remainingRevealTaskIds = workingTasks
+        .map((task) => task.id)
+        .filter((taskId) => !revealedTaskIds.has(taskId))
+
+      for (const taskId of remainingRevealTaskIds) {
+        if (contextVersionRef.current !== version) {
+          return
+        }
+
+        revealBoardTask(taskId)
+        revealedTaskIds.add(taskId)
+        await wait(BOARD_REVEAL_BEFORE_EVALUATION_MS)
       }
 
       setIncidentCount(appliedIncidents)
@@ -2218,6 +2507,8 @@ export function SelfTriagingDemo() {
       if (contextVersionRef.current !== version) {
         return
       }
+
+      setActiveScanTaskId(null)
 
       const derivedTimelineState = evaluateTasks(workingTasks, passLabel)
 
@@ -2286,7 +2577,10 @@ export function SelfTriagingDemo() {
               decision,
               previousTask,
               before: captureTaskStateSnapshot(previousTask),
-              after: projectTaskStateSnapshotForAction(previousTask, actionType),
+              after: projectTaskStateSnapshotForAction(
+                previousTask,
+                actionType,
+              ),
               eventTriage: triageForEvent
                 ? {
                     suggestedRemediation: triageForEvent.suggestedRemediation,
@@ -2353,6 +2647,7 @@ export function SelfTriagingDemo() {
     })().finally(() => {
       if (contextVersionRef.current === version) {
         setActiveScanTaskId(null)
+        resetBoardRevealState()
         setIsTriagePassRunning(false)
       }
     })
@@ -2365,71 +2660,64 @@ export function SelfTriagingDemo() {
           <div className="space-y-2">
             <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
               <div className="space-y-2">
-                <h1 className="text-3xl font-semibold tracking-tight text-zinc-900 sm:text-4xl dark:text-zinc-100">
-                  Self-triaging todo system
-                </h1>
-              </div>
-              <div className="flex items-center gap-3 self-start sm:pt-1">
-                {TRIAGE_MODE === 'pseudo' ? (
-                  <div
-                    className="relative"
-                    onMouseEnter={() => setIsAiInfoOpen(true)}
-                    onMouseLeave={() => setIsAiInfoOpen(false)}
-                  >
-                    <button
-                      type="button"
-                      onClick={() => setIsAiInfoOpen((current) => !current)}
-                      onFocus={() => setIsAiInfoOpen(true)}
-                      onBlur={() => setIsAiInfoOpen(false)}
-                      className={`${basePillClass} cursor-pointer border-zinc-300/65 bg-zinc-700 text-zinc-300 transition hover:border-zinc-200/75 hover:bg-zinc-600 hover:text-zinc-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400/60 dark:border-zinc-600/55 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:border-zinc-500/70 dark:hover:bg-zinc-700 dark:hover:text-zinc-200`}
+                <div className="flex flex-wrap items-center gap-3">
+                  <h1 className="text-3xl font-semibold tracking-tight text-zinc-900 sm:text-4xl dark:text-zinc-100">
+                    Self-triaging todo system
+                  </h1>
+                  {TRIAGE_MODE === 'pseudo' ? (
+                    <div
+                      className="relative"
+                      onMouseEnter={() => setIsAiInfoOpen(true)}
+                      onMouseLeave={() => setIsAiInfoOpen(false)}
                     >
-                      <span>AI</span>
-                      <span className="flex h-4 w-4 items-center justify-center rounded-full border border-white/22 text-[10px] leading-none text-white">
-                        i
-                      </span>
-                    </button>
-                    <Transition
-                      as={Fragment}
-                      show={isAiInfoOpen}
-                      enter="transition ease-out duration-200"
-                      enterFrom="opacity-0 translate-y-1"
-                      enterTo="opacity-100 translate-y-0"
-                      leave="transition ease-in duration-150"
-                      leaveFrom="opacity-100 translate-y-0"
-                      leaveTo="opacity-0 translate-y-1"
-                    >
-                      <div className="absolute top-full right-0 z-20 mt-3 w-80 overflow-hidden rounded-2xl border border-zinc-200/65 bg-white/95 shadow-2xl ring-1 ring-zinc-900/4 backdrop-blur dark:border-zinc-700/30 dark:bg-zinc-950/95 dark:ring-white/8">
-                        <div className="space-y-2 rounded-2xl bg-zinc-100/80 p-4 dark:bg-zinc-900/60">
-                          <p className="text-xs font-medium tracking-[0.16em] text-zinc-500 uppercase dark:text-zinc-400">
-                            Demo mode
-                          </p>
-                          <p className="text-xs leading-5 text-zinc-600 dark:text-zinc-400">
-                            API calls are paused. Signals, guardrails, and
-                            action logging still run locally, and identical
-                            triage contexts are cached for this session.
-                          </p>
-                          <div className="flex flex-wrap gap-2">
-                            <DemoBadge color="blue">
-                              Cache hits {usageSummary.cacheHits}
-                            </DemoBadge>
-                            <DemoBadge color="yellow">
-                              Fallbacks {usageSummary.fallbacks}
-                            </DemoBadge>
+                      <button
+                        type="button"
+                        onClick={() => setIsAiInfoOpen((current) => !current)}
+                        onFocus={() => setIsAiInfoOpen(true)}
+                        onBlur={() => setIsAiInfoOpen(false)}
+                        className={`${basePillClass} cursor-pointer border-zinc-300/65 bg-zinc-700 text-zinc-300 transition hover:border-zinc-200/75 hover:bg-zinc-600 hover:text-zinc-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400/60 dark:border-zinc-600/55 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:border-zinc-500/70 dark:hover:bg-zinc-700 dark:hover:text-zinc-200`}
+                      >
+                        <span>AI</span>
+                        <span className="flex h-4 w-4 items-center justify-center rounded-full border border-white/22 text-[10px] leading-none text-white">
+                          i
+                        </span>
+                      </button>
+                      <Transition
+                        as={Fragment}
+                        show={isAiInfoOpen}
+                        enter="transition ease-out duration-200"
+                        enterFrom="opacity-0 translate-y-1"
+                        enterTo="opacity-100 translate-y-0"
+                        leave="transition ease-in duration-150"
+                        leaveFrom="opacity-100 translate-y-0"
+                        leaveTo="opacity-0 translate-y-1"
+                      >
+                        <div className="absolute top-full left-0 z-20 mt-3 w-80 overflow-hidden rounded-2xl border border-zinc-200/65 bg-white/95 shadow-2xl ring-1 ring-zinc-900/4 backdrop-blur dark:border-zinc-700/30 dark:bg-zinc-950/95 dark:ring-white/8">
+                          <div className="space-y-2 rounded-2xl bg-zinc-100/80 p-4 dark:bg-zinc-900/60">
+                            <p className="text-xs font-medium tracking-[0.16em] text-zinc-500 uppercase dark:text-zinc-400">
+                              Demo mode
+                            </p>
+                            <p className="text-xs leading-5 text-zinc-600 dark:text-zinc-400">
+                              API calls are paused. Signals, guardrails, and
+                              action logging still run locally, and identical
+                              triage contexts are cached for this session.
+                            </p>
+                            <div className="flex flex-wrap gap-2">
+                              <DemoBadge color="blue">
+                                Cache hits {usageSummary.cacheHits}
+                              </DemoBadge>
+                              <DemoBadge color="yellow">
+                                Fallbacks {usageSummary.fallbacks}
+                              </DemoBadge>
+                            </div>
                           </div>
                         </div>
-                      </div>
-                    </Transition>
-                  </div>
-                ) : null}
-                <button
-                  type="button"
-                  onClick={() => setIsHistoryOpen(true)}
-                  title="Open triage history"
-                  aria-label="Open triage history"
-                  className="inline-flex cursor-pointer items-center justify-center rounded-xl border border-zinc-200/65 bg-zinc-50/80 px-3 py-2 text-sm font-semibold text-zinc-700 shadow-sm ring-1 ring-zinc-900/4 transition hover:border-zinc-300/75 hover:bg-zinc-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400/60 dark:border-zinc-700/30 dark:bg-zinc-900/50 dark:text-zinc-200 dark:ring-white/8 dark:hover:border-zinc-600/60 dark:hover:bg-zinc-800/80"
-                >
-                  <CpuChipIcon className="h-4 w-4" />
-                </button>
+                      </Transition>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+              <div className="flex items-center gap-3 self-start sm:pt-1">
                 <button
                   type="button"
                   onClick={() => {
@@ -2481,193 +2769,226 @@ export function SelfTriagingDemo() {
             emphasis="primary"
           >
             <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-4">
-              {groupedTasks.map(({ status, tasks }) => (
-                <div
-                  key={status}
-                  className={`rounded-2xl border p-4 ${statusPanelClasses[status]}`}
-                >
-                  <div className="mb-4 flex items-center justify-between gap-3">
-                    <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
-                      {statusLabels[status]}
-                    </h2>
-                    <DemoBadge color={statusBadgeColor[status]}>
-                      {tasks.length}
-                    </DemoBadge>
-                  </div>
+              {groupedTasks.map(({ status, tasks }) => {
+                const visibleTaskCount = tasks.filter((task) =>
+                  visibleBoardTaskIds.includes(task.id),
+                ).length
+                const displayTaskCount = isTriagePassRunning
+                  ? visibleTaskCount
+                  : tasks.length
+
+                return (
+                  <div
+                    key={status}
+                    className={`rounded-2xl border p-4 ${statusPanelClasses[status]}`}
+                  >
+                    <div className="mb-4 flex items-center justify-between gap-3">
+                      <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                        {statusLabels[status]}
+                      </h2>
+                      <DemoBadge color={statusBadgeColor[status]}>
+                        {isBoardBooting ? 0 : displayTaskCount}
+                      </DemoBadge>
+                    </div>
                   <div className="space-y-3">
-                    {tasks.map((task) => (
-                      <TaskCard
-                        key={task.id}
-                        task={task}
-                        isFocused={activeTaskId === task.id}
-                        focusTone={activeTaskTone}
-                        onClick={() => {
-                          setSelectedTaskId(task.id)
-                          const nextSignal = selectSignalForTask(task.id)
-                          setSelectedSignalId(nextSignal?.id ?? '')
-                          const matchingTimelineEvent =
-                            findLatestTimelineEventForTask(task.id)
-
-                          setSelectedTimelineEventId(
-                            matchingTimelineEvent?.id ?? null,
-                          )
-                          setScrollToTimelineEventId(
-                            matchingTimelineEvent?.id ?? null,
-                          )
-
-                          if (matchingTimelineEvent) {
-                            setIsHistoryOpen(true)
-                          }
-                        }}
-                        isActiveScan={activeScanTaskId === task.id}
-                        isRecentlyTriaged={recentlyTriagedTaskIds.includes(
-                          task.id,
-                        )}
-                        isRecentlyChanged={recentlyChangedTaskIds.includes(
-                          task.id,
-                        )}
+                    {(boardRevealQueue[status] ?? []).map((queuedTaskId) => (
+                      <TaskCardSkeleton
+                        key={`${status}-skeleton-${queuedTaskId}`}
                       />
                     ))}
+                    {tasks.map((task) => {
+                      const shouldShowTask =
+                        !isBoardBooting &&
+                        (!isTriagePassRunning ||
+                          visibleBoardTaskIds.includes(task.id))
+                      const matchingTimelineEvent =
+                        findLatestTimelineEventForTask(task.id)
+
+                      return (
+                        <Transition
+                          key={task.id}
+                          as={Fragment}
+                          show={shouldShowTask}
+                          appear
+                          enter="transform transition duration-1000 ease-out"
+                          enterFrom="-translate-x-6 opacity-0"
+                          enterTo="translate-x-0 opacity-100"
+                          leave="transition duration-150 ease-in"
+                          leaveFrom="opacity-100"
+                          leaveTo="opacity-0"
+                        >
+                          <div>
+                            <TaskCard
+                              task={task}
+                              isFocused={activeTaskId === task.id}
+                              focusTone={activeTaskTone}
+                              hoverTone={getTimelineEventFocusTone(
+                                matchingTimelineEvent,
+                              )}
+                              onClick={
+                                matchingTimelineEvent
+                                  ? () => {
+                                      const pulseToken = Date.now()
+                                      setSelectedTaskId(task.id)
+                                      const nextSignal = selectSignalForTask(
+                                        task.id,
+                                      )
+                                      setSelectedSignalId(nextSignal?.id ?? '')
+                                      setSelectedTimelineEventId(
+                                        matchingTimelineEvent.id,
+                                      )
+                                      setPulsedTimelineEvent({
+                                        id: matchingTimelineEvent.id,
+                                        token: pulseToken,
+                                      })
+                                      setScrollToTimelineEventId(
+                                        matchingTimelineEvent.id,
+                                      )
+                                      setIsHistoryOpen(true)
+                                    }
+                                  : undefined
+                              }
+                              isActiveScan={activeScanTaskId === task.id}
+                              isRecentlyTriaged={recentlyTriagedTaskIds.includes(
+                                task.id,
+                              )}
+                              isRecentlyChanged={recentlyChangedTaskIds.includes(
+                                task.id,
+                              )}
+                            />
+                          </div>
+                        </Transition>
+                      )
+                    })}
                   </div>
-                </div>
-              ))}
+                  </div>
+                )
+              })}
             </div>
           </Panel>
-          <Panel
-            title="Triage history"
-            description="History is now a single timeline for live detection, decisions, and actions."
-            emphasis="secondary"
-          >
-            <p className="text-sm text-zinc-600 dark:text-zinc-400">
-              Board remains the source of truth. Open triage history to inspect
-              the full signal to decision to action sequence as one running
-              feed.
-            </p>
-          </Panel>
-
         </div>
       </div>
-      <Dialog
-        open={isHistoryOpen}
-        onClose={setIsHistoryOpen}
-        className="relative z-40"
+      <Transition
+        as={Fragment}
+        show={isHistoryOpen}
+        appear
+        enter="transform transition duration-500 ease-in-out sm:duration-700"
+        enterFrom="translate-x-full"
+        enterTo="translate-x-0"
+        leave="transform transition duration-500 ease-in-out sm:duration-700"
+        leaveFrom="translate-x-0"
+        leaveTo="translate-x-full"
       >
-        <div className="fixed inset-0 bg-zinc-950/10" />
-        <div className="fixed inset-0 overflow-hidden">
-          <div className="absolute inset-0 overflow-hidden">
-            <div className="pointer-events-none fixed inset-y-0 right-0 flex max-w-full pl-10 sm:pl-16">
-              <DialogPanel
-                transition
-                className="pointer-events-auto w-screen max-w-md transform transition duration-500 ease-in-out data-closed:translate-x-full sm:duration-700"
-              >
-                <div className="relative flex h-full flex-col overflow-y-auto bg-white shadow-2xl dark:bg-zinc-950">
-                  <div className="border-b border-zinc-200/65 bg-zinc-100/90 px-4 py-6 shadow-inner sm:px-6 dark:border-zinc-800/55 dark:bg-zinc-900/90">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-3">
-                        <div className="inline-flex h-10 w-10 items-center justify-center rounded-xl bg-zinc-200/80 text-zinc-700 ring-1 ring-zinc-300/45 dark:bg-zinc-800 dark:text-zinc-200 dark:ring-zinc-700/45">
-                          <CpuChipIcon className="h-5 w-5" />
-                        </div>
-                        <div>
-                          <DialogTitle className="text-lg font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">
-                            Triage history
-                          </DialogTitle>
-                          <p className="mt-1 max-w-xs text-sm leading-6 text-zinc-600 dark:text-zinc-400">
-                            Live decisions from the current session, rendered
-                            top down.
-                          </p>
-                        </div>
-                      </div>
-                      <div className="ml-3 flex h-7 items-center">
-                        <button
-                          type="button"
-                          onClick={() => setIsHistoryOpen(false)}
-                          className="relative z-10 pointer-events-auto rounded-md text-zinc-500 transition hover:text-zinc-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 dark:focus-visible:outline-zinc-100"
-                        >
-                          <span className="absolute -inset-2.5" />
-                          <span className="sr-only">Close panel</span>
-                          <XMarkIcon aria-hidden="true" className="size-6" />
-                        </button>
-                      </div>
+        <div className="pointer-events-none fixed inset-y-0 right-0 z-40 flex max-w-full pl-10 sm:pl-16">
+          <div className="pointer-events-auto w-screen max-w-md">
+            <div className="relative flex h-full flex-col overflow-y-auto bg-white shadow-2xl dark:bg-zinc-950">
+              <div className="border-b border-zinc-200/65 bg-zinc-100/90 px-4 py-6 shadow-inner sm:px-6 dark:border-zinc-800/55 dark:bg-zinc-900/90">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="inline-flex h-10 w-10 items-center justify-center rounded-xl bg-zinc-200/80 text-zinc-700 ring-1 ring-zinc-300/45 dark:bg-zinc-800 dark:text-zinc-200 dark:ring-zinc-700/45">
+                      <CpuChipIcon className="h-5 w-5" />
+                    </div>
+                    <div>
+                      <h2 className="text-lg font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">
+                        Triage history
+                      </h2>
+                      <p className="mt-1 max-w-xs text-sm leading-6 text-zinc-600 dark:text-zinc-400">
+                        Live decisions from the current session.
+                      </p>
                     </div>
                   </div>
-                  <div
-                    ref={historyBodyRef}
-                    className="relative flex-1 space-y-3 overflow-y-auto bg-zinc-50/80 px-4 py-6 sm:px-6 dark:bg-zinc-900/60"
-                  >
-                    {timelineEvents.length > 0 || isTriagePassRunning ? (
-                      <div className="flow-root">
-                        <ul role="list" className="-mb-5">
-                          {isTriagePassRunning ? (
-                            <TimelineLoadingRow
-                              title={narrativeHeader?.title}
-                              subtitle={narrativeHeader?.subtitle}
-                            />
-                          ) : null}
-                          {orderedTimelineEvents.map((entry, index, entries) => {
-                            const insightContext = entry.taskId
-                              ? buildTaskInsightContext({
-                                  snapshot,
-                                  effectiveTriage,
-                                  aiPendingSignalIds,
-                                  selectedSignalId:
-                                    entry.signalId ??
-                                    selectFirstSignalForTask(snapshot, entry.taskId),
-                                  taskId: entry.taskId,
-                                })
-                              : null
-
-                            return (
-                              <TimelineEventRow
-                                key={`${entry.id}-${
-                                  selectedTimelineEventId === entry.id
-                                    ? 'selected'
-                                    : 'idle'
-                                }`}
-                                entry={entry}
-                                isLast={index === entries.length - 1}
-                                isSelected={selectedTimelineEventId === entry.id}
-                                isRecent={recentTimelineEventIds.includes(entry.id)}
-                                shouldScrollIntoView={
-                                  isHistoryOpen &&
-                                  scrollToTimelineEventId === entry.id
-                                }
-                                insightContext={insightContext}
-                                onSelectSignal={(signalId) => {
-                                  setSelectedTimelineEventId(entry.id)
-                                  setScrollToTimelineEventId(null)
-                                  setSelectedTaskId(entry.taskId ?? null)
-                                  setSelectedSignalId(signalId)
-                                }}
-                                onSelectEvent={() => selectTimelineEvent(entry)}
-                              />
-                            )
-                          })}
-                        </ul>
-                      </div>
-                    ) : !isTriagePassRunning
-                        ? Array.from({ length: 5 }).map((_, index) => (
-                          <div
-                            key={`history-skeleton-${index}`}
-                            className="rounded-2xl border border-zinc-200/65 bg-white p-4 shadow-sm ring-1 ring-zinc-900/4 dark:border-zinc-800/55 dark:bg-zinc-950 dark:ring-white/4"
-                          >
-                            <div className="flex items-start gap-3">
-                              <div className="mt-0.5 h-9 w-9 shrink-0 animate-pulse rounded-xl bg-zinc-200 dark:bg-zinc-800" />
-                              <div className="min-w-0 flex-1 space-y-2">
-                                <div className="h-4 w-3/4 animate-pulse rounded bg-zinc-200 dark:bg-zinc-800" />
-                                <div className="h-3 w-full animate-pulse rounded bg-zinc-100 dark:bg-zinc-900/90" />
-                                <div className="h-3 w-5/6 animate-pulse rounded bg-zinc-100 dark:bg-zinc-900/90" />
-                              </div>
-                            </div>
-                          </div>
-                          ))
-                        : null}
+                  <div className="ml-3 flex h-7 items-center">
+                    <button
+                      type="button"
+                      onClick={() => setIsHistoryOpen(false)}
+                      className="pointer-events-auto relative z-30 inline-flex h-10 w-10 items-center justify-center rounded-xl text-zinc-500 transition hover:bg-zinc-200/75 hover:text-zinc-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400/60 dark:text-zinc-400 dark:hover:bg-zinc-800/80 dark:hover:text-zinc-100 dark:focus-visible:ring-zinc-500/60"
+                    >
+                      <span className="sr-only">Close panel</span>
+                      <XMarkIcon aria-hidden="true" className="size-6" />
+                    </button>
                   </div>
                 </div>
-              </DialogPanel>
+              </div>
+              <div
+                ref={historyBodyRef}
+                className="relative flex-1 space-y-3 overflow-y-auto bg-zinc-50/80 px-4 py-6 sm:px-6 dark:bg-zinc-900/60"
+              >
+                {timelineEvents.length > 0 || isTriagePassRunning ? (
+                  <div className="flow-root">
+                    <ul role="list" className="-mb-5">
+                      {isTriagePassRunning ? (
+                        <TimelineLoadingRow
+                          title={narrativeHeader?.title}
+                          subtitle={narrativeHeader?.subtitle}
+                        />
+                      ) : null}
+                      {orderedTimelineEvents.map((entry, index, entries) => {
+                        const insightContext = entry.taskId
+                          ? buildTaskInsightContext({
+                              snapshot,
+                              effectiveTriage,
+                              aiPendingSignalIds,
+                              selectedSignalId:
+                                entry.signalId ??
+                                selectFirstSignalForTask(
+                                  snapshot,
+                                  entry.taskId,
+                                ),
+                              taskId: entry.taskId,
+                            })
+                          : null
+
+                        return (
+                          <TimelineEventRow
+                            key={entry.id}
+                            entry={entry}
+                            isLast={index === entries.length - 1}
+                            isSelected={selectedTimelineEventId === entry.id}
+                            isRecent={recentTimelineEventIds.includes(entry.id)}
+                            pulseToken={
+                              pulsedTimelineEvent?.id === entry.id
+                                ? pulsedTimelineEvent.token
+                                : null
+                            }
+                            shouldScrollIntoView={
+                              isHistoryOpen &&
+                              scrollToTimelineEventId === entry.id
+                            }
+                            insightContext={insightContext}
+                            onSelectSignal={(signalId) => {
+                              setSelectedTimelineEventId(entry.id)
+                              setScrollToTimelineEventId(null)
+                              setSelectedTaskId(entry.taskId ?? null)
+                              setSelectedSignalId(signalId)
+                            }}
+                            onSelectEvent={() => selectTimelineEvent(entry)}
+                          />
+                        )
+                      })}
+                    </ul>
+                  </div>
+                ) : !isTriagePassRunning ? (
+                  Array.from({ length: 5 }).map((_, index) => (
+                    <div
+                      key={`history-skeleton-${index}`}
+                      className="rounded-2xl border border-zinc-200/65 bg-white p-4 shadow-sm ring-1 ring-zinc-900/4 dark:border-zinc-800/55 dark:bg-zinc-950 dark:ring-white/4"
+                    >
+                      <div className="flex items-start gap-3">
+                        <div className="mt-0.5 h-9 w-9 shrink-0 animate-pulse rounded-xl bg-zinc-200 dark:bg-zinc-800" />
+                        <div className="min-w-0 flex-1 space-y-2">
+                          <div className="h-4 w-3/4 animate-pulse rounded bg-zinc-200 dark:bg-zinc-800" />
+                          <div className="h-3 w-full animate-pulse rounded bg-zinc-100 dark:bg-zinc-900/90" />
+                          <div className="h-3 w-5/6 animate-pulse rounded bg-zinc-100 dark:bg-zinc-900/90" />
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                ) : null}
+              </div>
             </div>
           </div>
         </div>
-      </Dialog>
+      </Transition>
       <style jsx>{`
         @keyframes demoFlickerRing {
           0% {
@@ -2745,6 +3066,7 @@ function TaskCard({
   task,
   isFocused = false,
   focusTone = 'neutral',
+  hoverTone = null,
   onClick,
   isActiveScan = false,
   isRecentlyTriaged = false,
@@ -2753,16 +3075,30 @@ function TaskCard({
   task: DemoTask
   isFocused?: boolean
   focusTone?: TaskFocusTone
+  hoverTone?: TaskFocusTone | null
   onClick?: () => void
   isActiveScan?: boolean
   isRecentlyTriaged?: boolean
   isRecentlyChanged?: boolean
 }) {
+  const isClickable = typeof onClick === 'function'
+  const hoverClass =
+    isClickable && !isFocused
+      ? hoverTone === 'escalate'
+        ? 'hover:border-red-300/65 hover:ring-1 hover:ring-red-200/45 dark:hover:border-red-500/25 dark:hover:ring-red-500/12'
+        : hoverTone === 'monitor'
+          ? 'hover:border-yellow-300/65 hover:ring-1 hover:ring-yellow-200/45 dark:hover:border-yellow-500/25 dark:hover:ring-yellow-500/12'
+          : hoverTone === 'stable'
+            ? 'hover:border-green-300/65 hover:ring-1 hover:ring-green-200/45 dark:hover:border-green-500/25 dark:hover:ring-green-500/12'
+            : 'hover:border-zinc-300/75 hover:ring-1 hover:ring-zinc-300/45 dark:hover:border-zinc-500/45 dark:hover:ring-zinc-500/16'
+      : ''
+
   return (
     <button
       type="button"
       onClick={onClick}
-      className={`rounded-2xl border bg-white p-4 shadow-sm transition duration-300 dark:bg-zinc-950/70 ${
+      disabled={!isClickable}
+      className={`rounded-2xl border bg-white px-4 py-5 shadow-sm transition duration-300 dark:bg-zinc-950/70 ${
         isFocused
           ? focusTone === 'escalate'
             ? 'border-red-300/65 ring-1 ring-red-200/50 dark:border-red-500/25 dark:ring-red-500/12'
@@ -2774,9 +3110,11 @@ function TaskCard({
           : 'border-zinc-200/65 dark:border-zinc-700/25'
       } ${
         isActiveScan
-          ? 'scale-[1.02] ring-2 ring-teal-300/55 dark:ring-teal-400/32'
+          ? 'scale-[1.02] ring-2 ring-blue-300/55 dark:ring-blue-400/32'
           : ''
-      } ${isRecentlyChanged || isRecentlyTriaged ? 'demo-flicker-ring' : ''} cursor-pointer text-left`}
+      } ${isRecentlyChanged || isRecentlyTriaged ? 'demo-flicker-ring' : ''} ${
+        isClickable ? 'cursor-pointer' : 'cursor-default'
+      } ${hoverClass} text-left`}
     >
       <div className="flex items-start justify-between gap-3">
         <p className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
@@ -2784,15 +3122,32 @@ function TaskCard({
         </p>
         <Badge color="gray">{task.priority}</Badge>
       </div>
-      <div className="mt-3 flex flex-wrap items-center gap-2">
+      <div className="mt-4 flex flex-wrap items-center gap-2.5">
         <Badge color={task.owner ? 'blue' : 'yellow'}>
           {task.owner ?? 'Unassigned'}
         </Badge>
-        {isActiveScan ? <Badge color="softTeal">Scanning</Badge> : null}
+        {isActiveScan ? <Badge color="blue">Scanning</Badge> : null}
         <span className="text-[11px] font-medium tracking-wide text-zinc-500 uppercase dark:text-zinc-400">
           {task.ageLabel}
         </span>
       </div>
     </button>
+  )
+}
+
+function TaskCardSkeleton() {
+  return (
+    <div className="rounded-2xl border border-zinc-200/65 bg-white px-4 py-5 shadow-sm dark:border-zinc-700/25 dark:bg-zinc-950/70">
+      <div className="animate-pulse">
+        <div className="flex items-start justify-between gap-3">
+          <div className="h-4 w-40 rounded bg-zinc-200 dark:bg-zinc-800" />
+          <div className="h-5 w-10 rounded-full bg-zinc-200 dark:bg-zinc-800" />
+        </div>
+        <div className="mt-4 flex items-center gap-2.5">
+          <div className="h-5 w-20 rounded-full bg-zinc-100 dark:bg-zinc-900/90" />
+          <div className="h-3 w-16 rounded bg-zinc-100 dark:bg-zinc-900/90" />
+        </div>
+      </div>
+    </div>
   )
 }
