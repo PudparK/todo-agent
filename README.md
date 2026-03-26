@@ -56,3 +56,13 @@ Configured in `src/app/layout.tsx` via Open Graph and Twitter metadata.
 - `src/components/Footer.tsx` - footer navigation
 - `src/components/BuyMeACoffee.tsx` - support button
 - `src/styles/tailwind.css` - Tailwind + typography plugin setup
+
+## Demo UI Note
+
+The self-triaging demo should keep its UI controls and overlays constrained to:
+
+- Tailwind CSS utility styling
+- Headless UI primitives for interactive behavior
+- Tailwind UI component patterns as visual reference only
+
+Avoid introducing parallel UI libraries or custom interaction systems for that demo unless a future change explicitly requires it.
