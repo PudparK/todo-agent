@@ -1520,7 +1520,7 @@ function TimelineEventRow({
     (entry.type === 'decision' || entry.type === 'action') &&
     insightContext !== null
   const EXPANDED_ROW_TOP_OFFSET = 12
-  const EXPANDED_ROW_SCROLL_DELAY_MS = 220
+  const EXPANDED_ROW_SCROLL_DELAY_MS = 340
 
   const scrollRowToTop = useCallback(() => {
     const row = rowRef.current
@@ -1554,7 +1554,9 @@ function TimelineEventRow({
     }
 
     const timeoutId = window.setTimeout(() => {
-      scrollRowToTop()
+      window.requestAnimationFrame(() => {
+        scrollRowToTop()
+      })
     }, EXPANDED_ROW_SCROLL_DELAY_MS)
 
     return () => {
@@ -2958,8 +2960,22 @@ export function SelfTriagingDemo() {
                   <div className="ml-3 flex h-7 items-center">
                     <button
                       type="button"
-                      onClick={() => setIsHistoryOpen(false)}
-                      className="pointer-events-auto relative z-30 inline-flex h-10 w-10 items-center justify-center rounded-xl text-zinc-500 transition hover:bg-zinc-200/75 hover:text-zinc-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400/60 dark:text-zinc-400 dark:hover:bg-zinc-800/80 dark:hover:text-zinc-100 dark:focus-visible:ring-zinc-500/60"
+                      onPointerDown={(event) => {
+                        event.preventDefault()
+                        event.stopPropagation()
+                        setIsHistoryOpen(false)
+                      }}
+                      onMouseDown={(event) => {
+                        event.preventDefault()
+                        event.stopPropagation()
+                        setIsHistoryOpen(false)
+                      }}
+                      onClick={(event) => {
+                        event.preventDefault()
+                        event.stopPropagation()
+                        setIsHistoryOpen(false)
+                      }}
+                      className="pointer-events-auto relative z-30 inline-flex h-10 w-10 cursor-pointer items-center justify-center rounded-xl text-zinc-500 transition hover:bg-zinc-200/75 hover:text-zinc-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400/60 dark:text-zinc-400 dark:hover:bg-zinc-800/80 dark:hover:text-zinc-100 dark:focus-visible:ring-zinc-500/60"
                     >
                       <span className="sr-only">Close panel</span>
                       <XMarkIcon aria-hidden="true" className="size-6" />
