@@ -1,9 +1,6 @@
 'use client'
 
 import {
-  Disclosure,
-  DisclosureButton,
-  DisclosurePanel,
   Transition,
 } from '@headlessui/react'
 import {
@@ -19,7 +16,7 @@ import {
   SparklesIcon,
 } from '@heroicons/react/20/solid'
 import { XMarkIcon } from '@heroicons/react/24/outline'
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import Badge from '@/components/Badge'
 import {
@@ -1495,27 +1492,51 @@ function TimelineEventRow({
   isLast,
   isSelected,
   isRecent,
+  isExpanded,
+  scrollContainerRef,
   pulseToken,
   shouldScrollIntoView = false,
   insightContext,
   onSelectSignal,
   onSelectEvent,
+  onToggleExpand,
 }: {
   entry: TimelineEvent
   isLast: boolean
   isSelected: boolean
   isRecent: boolean
+  isExpanded: boolean
+  scrollContainerRef: React.RefObject<HTMLDivElement | null>
   pulseToken?: number | null
   shouldScrollIntoView?: boolean
   insightContext: TaskInsightContext | null
   onSelectSignal: (signalId: string) => void
   onSelectEvent: () => void
+  onToggleExpand: () => void
 }) {
   const rowRef = useRef<HTMLLIElement | null>(null)
   const cardRef = useRef<HTMLDivElement | null>(null)
   const isExpandable =
     (entry.type === 'decision' || entry.type === 'action') &&
     insightContext !== null
+  const EXPANDED_ROW_TOP_OFFSET = 12
+  const EXPANDED_ROW_SCROLL_DELAY_MS = 220
+
+  const scrollRowToTop = useCallback(() => {
+    const row = rowRef.current
+    const container = scrollContainerRef.current
+
+    if (!row || !container) {
+      return
+    }
+
+    const topOffset = Math.max(0, row.offsetTop - EXPANDED_ROW_TOP_OFFSET)
+
+    container.scrollTo({
+      top: topOffset,
+      behavior: 'smooth',
+    })
+  }, [scrollContainerRef])
 
   useEffect(() => {
     if (!shouldScrollIntoView) {
@@ -1523,12 +1544,23 @@ function TimelineEventRow({
     }
 
     window.requestAnimationFrame(() => {
-      rowRef.current?.scrollIntoView({
-        behavior: 'smooth',
-        block: 'nearest',
-      })
+      scrollRowToTop()
     })
-  }, [shouldScrollIntoView])
+  }, [scrollRowToTop, shouldScrollIntoView])
+
+  useEffect(() => {
+    if (!isExpanded) {
+      return
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      scrollRowToTop()
+    }, EXPANDED_ROW_SCROLL_DELAY_MS)
+
+    return () => {
+      window.clearTimeout(timeoutId)
+    }
+  }, [isExpanded, scrollRowToTop])
 
   useEffect(() => {
     if (!pulseToken) {
@@ -1631,55 +1663,62 @@ function TimelineEventRow({
               className="absolute top-8 left-4 h-full w-px bg-zinc-200/75 dark:bg-zinc-800/75"
             />
           ) : null}
-          <Disclosure
-            defaultOpen={false}
-            as="div"
-            className="relative flex gap-3"
-          >
-            {({ open }) => (
-              <>
-                <span
-                  className={`relative z-10 flex h-8 w-8 shrink-0 items-center justify-center rounded-full ring-8 ring-zinc-50/80 dark:ring-zinc-900/60 ${getTimelineEventIconClasses(
-                    entry,
-                  )}`}
-                >
-                  {renderTimelineEventIcon(entry)}
-                </span>
-                <div
-                  ref={cardRef}
-                  className={`min-w-0 flex-1 overflow-hidden rounded-2xl border ${rowCardClass}`}
-                >
-                  <DisclosureButton
-                    onClick={onSelectEvent}
-                    className="group flex w-full items-start justify-between gap-3 px-4 py-4 text-left"
-                  >
-                    <div className="min-w-0 flex-1">
-                      <p className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
-                        {entry.title}
-                      </p>
-                      <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-                        {entry.description}
-                      </p>
-                    </div>
-                    <ChevronDownIcon
-                      className={`size-5 shrink-0 text-zinc-400 transition duration-200 dark:text-zinc-500 ${
-                        open
-                          ? 'rotate-180 text-zinc-600 dark:text-zinc-300'
-                          : ''
-                      }`}
-                    />
-                  </DisclosureButton>
-                  <DisclosurePanel>
-                    <TimelineEventDetails
-                      entry={entry}
-                      insightContext={insightContext}
-                      onSelectSignal={onSelectSignal}
-                    />
-                  </DisclosurePanel>
+          <div className="relative flex gap-3">
+            <span
+              className={`relative z-10 flex h-8 w-8 shrink-0 items-center justify-center rounded-full ring-8 ring-zinc-50/80 dark:ring-zinc-900/60 ${getTimelineEventIconClasses(
+                entry,
+              )}`}
+            >
+              {renderTimelineEventIcon(entry)}
+            </span>
+            <div
+              ref={cardRef}
+              className={`min-w-0 flex-1 overflow-hidden rounded-2xl border ${rowCardClass}`}
+            >
+              <button
+                type="button"
+                onClick={() => {
+                  onSelectEvent()
+                  onToggleExpand()
+                }}
+                className="group flex w-full items-start justify-between gap-3 px-4 py-4 text-left"
+              >
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                    {entry.title}
+                  </p>
+                  <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+                    {entry.description}
+                  </p>
                 </div>
-              </>
-            )}
-          </Disclosure>
+                <ChevronDownIcon
+                  className={`size-5 shrink-0 text-zinc-400 transition duration-200 dark:text-zinc-500 ${
+                    isExpanded
+                      ? 'rotate-180 text-zinc-600 dark:text-zinc-300'
+                      : ''
+                  }`}
+                />
+              </button>
+              <Transition
+                show={isExpanded}
+                unmount={false}
+                enter="transition-[max-height,opacity] duration-300 ease-out"
+                enterFrom="max-h-0 opacity-0"
+                enterTo="max-h-[40rem] opacity-100"
+                leave="transition-[max-height,opacity] duration-250 ease-in"
+                leaveFrom="max-h-[40rem] opacity-100"
+                leaveTo="max-h-0 opacity-0"
+              >
+                <div className="overflow-hidden">
+                  <TimelineEventDetails
+                    entry={entry}
+                    insightContext={insightContext}
+                    onSelectSignal={onSelectSignal}
+                  />
+                </div>
+              </Transition>
+            </div>
+          </div>
         </div>
       </li>
     </Transition>
@@ -1759,6 +1798,9 @@ export function SelfTriagingDemo() {
     string[]
   >([])
   const [selectedTimelineEventId, setSelectedTimelineEventId] = useState<
+    string | null
+  >(null)
+  const [expandedTimelineEventId, setExpandedTimelineEventId] = useState<
     string | null
   >(null)
   const [pulsedTimelineEvent, setPulsedTimelineEvent] = useState<{
@@ -1889,6 +1931,7 @@ export function SelfTriagingDemo() {
     setTimelineEvents([])
     setRecentTimelineEventIds([])
     setSelectedTimelineEventId(null)
+    setExpandedTimelineEventId(null)
     setSelectedTaskId(null)
     setPulsedTimelineEvent(null)
     setScrollToTimelineEventId(null)
@@ -1964,6 +2007,12 @@ export function SelfTriagingDemo() {
 
       setSelectedSignalId(matchingSignal?.id ?? '')
     }
+  }
+
+  function toggleTimelineEventExpansion(event: TimelineEvent) {
+    setExpandedTimelineEventId((current) =>
+      current === event.id ? null : event.id,
+    )
   }
 
   function findLatestTimelineEventForTask(taskId: string) {
@@ -2486,22 +2535,6 @@ export function SelfTriagingDemo() {
             previousTask: currentTask,
           })
         }
-        workingTasks = workingTasks.map((task) =>
-          task.id === taskId ? decision.nextTask : task,
-        )
-
-        setSnapshot((current) => ({
-          ...current,
-          tasks: workingTasks,
-        }))
-        setRecentlyTriagedTaskIds((current) => [
-          ...new Set([taskId, ...current]),
-        ])
-        window.setTimeout(() => {
-          setRecentlyTriagedTaskIds((current) =>
-            current.filter((currentTaskId) => currentTaskId !== taskId),
-          )
-        }, 1400)
       }
 
       if (contextVersionRef.current !== version) {
@@ -2510,7 +2543,14 @@ export function SelfTriagingDemo() {
 
       setActiveScanTaskId(null)
 
-      const derivedTimelineState = evaluateTasks(workingTasks, passLabel)
+      const projectedTasks = narrativeDecisions.reduce(
+        (currentTasks, { decision }) =>
+          currentTasks.map((task) =>
+            task.id === decision.nextTask.id ? decision.nextTask : task,
+          ),
+        workingTasks,
+      )
+      const derivedTimelineState = evaluateTasks(projectedTasks, passLabel)
 
       for (const { decision } of narrativeDecisions) {
         if (contextVersionRef.current !== version) {
@@ -2527,7 +2567,7 @@ export function SelfTriagingDemo() {
               signalId: selectFirstSignalForTask(
                 {
                   ...runStartSnapshot,
-                  tasks: workingTasks,
+                  tasks: projectedTasks,
                   signals: derivedTimelineState.signals,
                   triage: derivedTimelineState.triage,
                   actions: runStartSnapshot.actions,
@@ -2551,12 +2591,12 @@ export function SelfTriagingDemo() {
         }
 
         const signalId = selectFirstSignalForTask(
-          {
-            ...runStartSnapshot,
-            tasks: workingTasks,
-            signals: derivedTimelineState.signals,
-            triage: derivedTimelineState.triage,
-            actions: runStartSnapshot.actions,
+                {
+                  ...runStartSnapshot,
+                  tasks: projectedTasks,
+                  signals: derivedTimelineState.signals,
+                  triage: derivedTimelineState.triage,
+                  actions: runStartSnapshot.actions,
           },
           decision.nextTask.id,
         )
@@ -2564,6 +2604,24 @@ export function SelfTriagingDemo() {
           ? derivedTimelineState.triage[signalId]
           : null
         const actionType = deriveTimelineActionType(decision, previousTask)
+
+        workingTasks = workingTasks.map((task) =>
+          task.id === decision.nextTask.id ? decision.nextTask : task,
+        )
+        setSnapshot((current) => ({
+          ...current,
+          tasks: workingTasks,
+        }))
+        setRecentlyTriagedTaskIds((current) => [
+          ...new Set([decision.nextTask.id, ...current]),
+        ])
+        window.setTimeout(() => {
+          setRecentlyTriagedTaskIds((current) =>
+            current.filter(
+              (currentTaskId) => currentTaskId !== decision.nextTask.id,
+            ),
+          )
+        }, 1400)
 
         appendTimelineEvent(
           buildTimelineEvent(
@@ -2945,6 +3003,8 @@ export function SelfTriagingDemo() {
                             isLast={index === entries.length - 1}
                             isSelected={selectedTimelineEventId === entry.id}
                             isRecent={recentTimelineEventIds.includes(entry.id)}
+                            isExpanded={expandedTimelineEventId === entry.id}
+                            scrollContainerRef={historyBodyRef}
                             pulseToken={
                               pulsedTimelineEvent?.id === entry.id
                                 ? pulsedTimelineEvent.token
@@ -2962,6 +3022,9 @@ export function SelfTriagingDemo() {
                               setSelectedSignalId(signalId)
                             }}
                             onSelectEvent={() => selectTimelineEvent(entry)}
+                            onToggleExpand={() =>
+                              toggleTimelineEventExpansion(entry)
+                            }
                           />
                         )
                       })}
