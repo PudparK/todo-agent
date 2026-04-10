@@ -26,7 +26,7 @@ export function BuyMeACoffee({
         variant={variant}
       >
         <MugIcon className="h-5 w-5 animate-[steam_1.4s_ease-in-out_infinite] fill-current" />
-        Buy me a coffee
+        Help fund AI tokens
       </Button>
     </div>
   )

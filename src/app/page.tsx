@@ -13,7 +13,6 @@ const SUBSTACK_URL = process.env.NEXT_PUBLIC_SUBSTACK_URL as string
 const INSTAGRAM_URL = process.env.NEXT_PUBLIC_INSTAGRAM_URL as string
 const GITHUB_URL = process.env.NEXT_PUBLIC_GITHUB_URL as string
 const LINKEDIN_URL = process.env.NEXT_PUBLIC_LINKEDIN_URL as string
-const TAGLINE = process.env.NEXT_PUBLIC_TAGLINE as string
 
 function SocialLink({
   href,
@@ -41,42 +40,42 @@ export default function HomePage() {
   return (
     <ContainerOuter className="py-20 sm:py-24">
       <div className="relative px-4 sm:px-8 lg:px-12">
-          <section className="mt-10">
-            <div>
-              <SelfTriagingDemo />
+        <section className="mt-10">
+          <div>
+            <SelfTriagingDemo />
+          </div>
+          <section className="mt-12 border-t border-zinc-200 pt-8 dark:border-zinc-700/40">
+            <div className="mb-6 flex items-center justify-center gap-4">
+              <SocialLink
+                href={SUBSTACK_URL}
+                label="Substack"
+                icon={SubstackIcon}
+              />
+              <SocialLink
+                href={INSTAGRAM_URL}
+                label="Instagram"
+                icon={InstagramIcon}
+              />
+              <SocialLink
+                href={GITHUB_URL}
+                label="GitHub"
+                icon={GitHubIcon}
+              />
+              <SocialLink
+                href={LINKEDIN_URL}
+                label="LinkedIn"
+                icon={LinkedInIcon}
+              />
             </div>
-            <section className="mt-12 border-t border-zinc-200 pt-8 dark:border-zinc-700/40">
-              <div className="mb-6 flex items-center justify-center gap-4">
-                <SocialLink
-                  href={SUBSTACK_URL}
-                  label="Substack"
-                  icon={SubstackIcon}
-                />
-                <SocialLink
-                  href={INSTAGRAM_URL}
-                  label="Instagram"
-                  icon={InstagramIcon}
-                />
-                <SocialLink
-                  href={GITHUB_URL}
-                  label="GitHub"
-                  icon={GitHubIcon}
-                />
-                <SocialLink
-                  href={LINKEDIN_URL}
-                  label="LinkedIn"
-                  icon={LinkedInIcon}
-                />
-              </div>
-              <p className="mx-auto mb-4 max-w-xl text-center text-sm text-zinc-500 italic dark:text-zinc-400">
-                If this starter or my writing helped you ship faster, you can
-                support the work with a coffee.
-              </p>
-              <div className="mt-6 flex items-center justify-center gap-x-6">
-                <BuyMeACoffee />
-              </div>
-            </section>
+            <p className="mx-auto mb-4 max-w-xl text-center text-sm text-zinc-500 italic dark:text-zinc-400">
+              If this demo was useful, you can help keep the AI tokens flowing
+              and support future experiments.
+            </p>
+            <div className="mt-6 flex items-center justify-center gap-x-6">
+              <BuyMeACoffee />
+            </div>
           </section>
+        </section>
       </div>
     </ContainerOuter>
   )

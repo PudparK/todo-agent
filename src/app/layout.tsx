@@ -8,17 +8,20 @@ import '@/styles/tailwind.css'
 
 export const metadata: Metadata = {
   metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? 'http://localhost:3000'),
-  title: 'Next.js Tailwind + Headless UI Template',
-  description: 'A minimal reusable starter template.',
+  title: 'Todo Agent',
+  description:
+    'A self-triaging todo system demo that detects task signals, explains triage decisions, and proposes follow-up actions.',
   openGraph: {
-    title: 'Next.js Tailwind + Headless UI Template',
-    description: 'A minimal reusable starter template.',
+    title: 'Todo Agent',
+    description:
+      'A self-triaging todo system demo that detects task signals, explains triage decisions, and proposes follow-up actions.',
     images: ['/graph-image.png'],
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'Next.js Tailwind + Headless UI Template',
-    description: 'A minimal reusable starter template.',
+    title: 'Todo Agent',
+    description:
+      'A self-triaging todo system demo that detects task signals, explains triage decisions, and proposes follow-up actions.',
     images: ['/graph-image.png'],
   },
 }

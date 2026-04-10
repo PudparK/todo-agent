@@ -51,10 +51,13 @@ const timestampLabels = [
 ]
 
 const signalPriority: Record<SignalKind, number> = {
+  fix_ready: 0,
   missing_owner: 0,
   task_overdue: 1,
-  stuck_in_progress: 2,
-  duplicate_task: 3,
+  noise_alert: 2,
+  known_issue: 3,
+  stuck_in_progress: 4,
+  duplicate_task: 5,
 }
 
 function stableTimestamp(index: number) {
@@ -76,7 +79,7 @@ function formatTaskReference(task: DemoTask) {
 function severityForOverdue(task: DemoTask): Severity {
   const rank = getPriorityRank(task.priority)
 
-  if (rank <= 1 || task.status === 'problematic') {
+  if (rank <= 1 || task.attentionState === 'needs_attention') {
     return 'high'
   }
 
@@ -84,7 +87,10 @@ function severityForOverdue(task: DemoTask): Severity {
 }
 
 function decisionForOverdue(task: DemoTask): TriageDecision {
-  return getPriorityRank(task.priority) <= 1 || task.status === 'problematic'
+  return (
+    getPriorityRank(task.priority) <= 1 ||
+    task.attentionState === 'needs_attention'
+  )
     ? 'escalate'
     : 'monitor'
 }
@@ -125,7 +131,7 @@ function suggestedRemediationForDecision(
     case 'monitor':
       return `Keep ${task.title} on a watch list and review the owner or progress during the next triage pass.`
     case 'escalate':
-      return `Route ${task.title} to manual review and move coordination into the problematic lane until ownership is clear.`
+      return `Mark ${task.title} as needs attention and route it for manual review until ownership and risk are resolved.`
     case 'auto_fix':
       return `Apply the deterministic fallback correction for ${task.title} without changing any other task fields.`
   }
@@ -181,10 +187,79 @@ function clampConfidence(confidence: number) {
 }
 
 export function evaluateTaskPassDecision(task: DemoTask): TaskPassDecision {
-  if (task.status === 'done') {
+  if (task.monitorDisposition === 'fix_ready') {
+    const nextTask =
+      task.attentionState === 'needs_attention'
+        ? {
+            ...task,
+            ageLabel: 'Fix proposed just now',
+          }
+        : {
+            ...task,
+            attentionState: 'needs_attention' as const,
+            ageLabel: 'Fix proposed just now',
+          }
+
+    return {
+      nextTask,
+      changed:
+        nextTask.attentionState !== task.attentionState ||
+        nextTask.ageLabel !== task.ageLabel,
+      title: 'Fix proposed',
+      reasoning:
+        'The alert reproduced cleanly and indicates a bounded fix path worth intervention.',
+      tone: 'escalate',
+    }
+  }
+
+  if (task.monitorDisposition === 'noise') {
+    const nextTask =
+      task.attentionState === 'watch'
+        ? {
+            ...task,
+            ageLabel: 'Threshold tuned just now',
+          }
+        : {
+            ...task,
+            attentionState: 'watch' as const,
+            ageLabel: 'Threshold tuned just now',
+          }
+
+    return {
+      nextTask,
+      changed:
+        nextTask.attentionState !== task.attentionState ||
+        nextTask.ageLabel !== task.ageLabel,
+      title: 'Monitor tuned',
+      reasoning:
+        'The alert pattern looks routine and is more consistent with monitor noise than a user-facing incident.',
+      tone: 'monitor',
+    }
+  }
+
+  if (task.monitorDisposition === 'known_issue') {
     return {
       nextTask: task,
       changed: false,
+      title: 'Stand down',
+      reasoning:
+        'An existing fix or linked issue already covers this alert.',
+      tone: 'monitor',
+    }
+  }
+
+  if (task.status === 'done') {
+    const nextTask =
+      task.attentionState === 'none'
+        ? task
+        : {
+            ...task,
+            attentionState: 'none' as const,
+          }
+
+    return {
+      nextTask,
+      changed: nextTask !== task,
       title: 'No change',
       reasoning: 'Completed work is skipped during the active triage scan.',
       tone: 'stable',
@@ -193,19 +268,22 @@ export function evaluateTaskPassDecision(task: DemoTask): TaskPassDecision {
 
   if (task.owner === null && getPriorityRank(task.priority) <= 1) {
     const nextTask =
-      task.status === 'problematic'
+      task.attentionState === 'needs_attention'
         ? task
         : {
             ...task,
-            status: 'problematic',
+            attentionState: 'needs_attention' as const,
             ageLabel: 'Escalated just now',
           }
 
     return {
       nextTask,
       changed: nextTask !== task,
-      title: task.status === 'problematic' ? 'Escalation confirmed' : 'Escalated',
-      reasoning: `${task.priority} work without an owner is treated as unsafe and routed into problematic handling.`,
+      title:
+        task.attentionState === 'needs_attention'
+          ? 'Escalation confirmed'
+          : 'Escalated',
+      reasoning: `${task.priority} work without an owner is unsafe until ownership is restored.`,
       tone: 'escalate',
     }
   }
@@ -217,19 +295,22 @@ export function evaluateTaskPassDecision(task: DemoTask): TaskPassDecision {
     getPriorityRank(task.priority) === 0
   ) {
     const nextTask =
-      task.status === 'problematic'
+      task.attentionState === 'needs_attention'
         ? task
         : {
             ...task,
-            status: 'problematic',
+            attentionState: 'needs_attention' as const,
             ageLabel: 'Escalated just now',
           }
 
     return {
       nextTask,
       changed: nextTask !== task,
-      title: task.status === 'problematic' ? 'Escalation confirmed' : 'Escalated',
-      reasoning: `Priority ${task.priority} + ${task.daysInStatus} days stagnant beyond due window triggered problematic-state handling.`,
+      title:
+        task.attentionState === 'needs_attention'
+          ? 'Escalation confirmed'
+          : 'Escalated',
+      reasoning: `Priority ${task.priority} work is overdue and has remained stagnant long enough to merit intervention.`,
       tone: 'escalate',
     }
   }
@@ -237,11 +318,11 @@ export function evaluateTaskPassDecision(task: DemoTask): TaskPassDecision {
   if (task.status === 'in_progress' && task.daysInStatus >= 10) {
     if (getPriorityRank(task.priority) <= 1) {
       const nextTask =
-        task.status === 'problematic'
+        task.attentionState === 'needs_attention'
           ? task
           : {
               ...task,
-              status: 'problematic',
+              attentionState: 'needs_attention' as const,
               ageLabel: 'Escalated just now',
             }
 
@@ -249,24 +330,42 @@ export function evaluateTaskPassDecision(task: DemoTask): TaskPassDecision {
         nextTask,
         changed: nextTask !== task,
         title:
-          task.status === 'problematic' ? 'Escalation confirmed' : 'Escalated',
-        reasoning: `${task.daysInStatus} days in progress at ${task.priority} priority reads as coordination failure, so the task was escalated.`,
+          task.attentionState === 'needs_attention'
+            ? 'Escalation confirmed'
+            : 'Escalated',
+        reasoning: `${task.daysInStatus} days in progress at ${task.priority} priority indicates coordination risk that merits intervention.`,
         tone: 'escalate',
       }
     }
 
+    const nextTask =
+      task.attentionState === 'watch'
+        ? task
+        : {
+            ...task,
+            attentionState: 'watch' as const,
+          }
+
     return {
-      nextTask: task,
-      changed: false,
+      nextTask,
+      changed: nextTask !== task,
       title: 'Monitored',
-      reasoning: `${task.daysInStatus} days in progress triggered watch-list monitoring, but the current priority did not justify an automatic state change.`,
+      reasoning: `${task.daysInStatus} days in progress suggests drift, but the current priority keeps this in watch status.`,
       tone: 'monitor',
     }
   }
 
+  const nextTask =
+    task.attentionState === 'none'
+      ? task
+      : {
+          ...task,
+          attentionState: 'none' as const,
+        }
+
   return {
-    nextTask: task,
-    changed: false,
+    nextTask,
+    changed: nextTask !== task,
     title: 'Stable',
     reasoning: 'No deterministic escalation rule fired for this task in the current scan.',
     tone: 'stable',
@@ -317,6 +416,39 @@ export function detectSignals(tasks: DemoTask[]): DemoSignal[] {
   const signals: DemoSignal[] = []
 
   for (const task of tasks) {
+    if (task.monitorDisposition === 'fix_ready') {
+      signals.push({
+        id: `fix_ready-${task.id}`,
+        kind: 'fix_ready',
+        taskId: task.id,
+        title: 'Issue reproduced in review workflow',
+        summary: `${task.title} reproduced cleanly in a reviewable workflow and needs classification.`,
+        detectedAt: '',
+      })
+    }
+
+    if (task.monitorDisposition === 'noise') {
+      signals.push({
+        id: `noise_alert-${task.id}`,
+        kind: 'noise_alert',
+        taskId: task.id,
+        title: 'Alert looks noisy',
+        summary: `${task.title} appears to be firing on routine activity and may need threshold tuning.`,
+        detectedAt: '',
+      })
+    }
+
+    if (task.monitorDisposition === 'known_issue') {
+      signals.push({
+        id: `known_issue-${task.id}`,
+        kind: 'known_issue',
+        taskId: task.id,
+        title: 'Alert overlaps tracked issue',
+        summary: `${task.title} overlaps with an existing tracked issue and should be checked before opening a new response.`,
+        detectedAt: '',
+      })
+    }
+
     if (task.status !== 'done' && !task.owner) {
       signals.push({
         id: `missing_owner-${task.id}`,
@@ -465,7 +597,7 @@ export function deriveTriage(
               decision: decisionForOverdue(task),
               reasoning:
                 decisionForOverdue(task) === 'escalate'
-                  ? 'The overdue work is either high priority or already problematic, so it should be raised immediately.'
+                  ? 'The overdue work is either high priority or already in needs-attention state, so it should be raised immediately.'
                   : 'The task is overdue, but a watch-list response is enough for the current risk level.',
               source: 'deterministic',
               aiDecision: decisionForOverdue(task),
@@ -477,6 +609,69 @@ export function deriveTriage(
               guardrailStatus: 'not_needed',
               guardrailReason:
                 'No automated remediation was requested for this deterministic baseline.',
+            },
+          ]
+        case 'noise_alert':
+          return [
+            signal.id,
+            {
+              signalId: signal.id,
+              expectationViolated:
+                'Monitors should alert on meaningful regressions, not routine traffic.',
+              severity: 'low',
+              confidence: 0.79,
+              decision: 'monitor',
+              reasoning:
+                'The alert pattern looks noisy, so threshold tuning is safer than routing a human immediately.',
+              source: 'deterministic',
+              aiDecision: 'monitor',
+              suggestedRemediation:
+                `Tune the threshold for ${task.title} and keep the monitor under watch for another sweep.`,
+              guardrailStatus: 'not_needed',
+              guardrailReason:
+                'No automated code remediation was requested for this noisy alert.',
+            },
+          ]
+        case 'known_issue':
+          return [
+            signal.id,
+            {
+              signalId: signal.id,
+              expectationViolated:
+                'Duplicate alerts should stand down when a known fix is already in flight.',
+              severity: 'low',
+              confidence: 0.9,
+              decision: 'ignore',
+              reasoning:
+                'The system already has an attached fix path, so a second intervention would be duplicate work.',
+              source: 'deterministic',
+              aiDecision: 'ignore',
+              suggestedRemediation:
+                `Stand down on ${task.title} and wait for the existing fix to land before re-alerting.`,
+              guardrailStatus: 'not_needed',
+              guardrailReason:
+                'No new intervention was requested because this alert is already accounted for.',
+            },
+          ]
+        case 'fix_ready':
+          return [
+            signal.id,
+            {
+              signalId: signal.id,
+              expectationViolated:
+                'Once a monitor reproduces cleanly, a bounded fix should be proposed for review.',
+              severity: getPriorityRank(task.priority) <= 1 ? 'critical' : 'high',
+              confidence: 0.88,
+              decision: 'escalate',
+              reasoning:
+                'The issue reproduced end-to-end, so the next step is to surface a fix proposal instead of waiting for another pass.',
+              source: 'deterministic',
+              aiDecision: 'escalate',
+              suggestedRemediation:
+                `Prepare a reviewable fix proposal for ${task.title} and notify the owning engineer.`,
+              guardrailStatus: 'not_needed',
+              guardrailReason:
+                'The fix proposal still requires engineer review before anything is merged.',
             },
           ]
         case 'stuck_in_progress': {
@@ -620,8 +815,8 @@ export function simulatePseudoAiTriage(
         decision: 'escalate',
         confidence: 0.78,
         reasoning:
-          task.status === 'problematic'
-            ? 'The overdue state is already compounding, so this should be treated as an escalation.'
+          task.attentionState === 'needs_attention'
+            ? 'The overdue state is already compounding under needs-attention, so this should be treated as an escalation.'
             : 'Pseudo AI treats overdue work as more urgent when it risks blocking follow-on tasks.',
         suggestedRemediation: `Escalate ${task.title} to an owner review and re-plan the due window.`,
       }
@@ -649,6 +844,39 @@ export function simulatePseudoAiTriage(
         reasoning:
           'Pseudo AI treats duplicate active work as coordination debt that should be watched before more time is spent.',
         suggestedRemediation: `Compare ownership across the duplicate tasks and consolidate the surviving work item.`,
+      }
+      break
+    case 'noise_alert':
+      pseudoResult = {
+        signalId: signal.id,
+        severity: 'low',
+        decision: 'monitor',
+        confidence: 0.74,
+        reasoning:
+          'Pseudo AI treats this as alert noise and prefers threshold tuning over waking up an engineer.',
+        suggestedRemediation: `Tune the monitor threshold for ${task.title} and keep the alert under observation.`,
+      }
+      break
+    case 'known_issue':
+      pseudoResult = {
+        signalId: signal.id,
+        severity: 'low',
+        decision: 'ignore',
+        confidence: 0.84,
+        reasoning:
+          'Pseudo AI found this alert overlaps with a known issue, so it should stand down instead of duplicating work.',
+        suggestedRemediation: `Stand down on ${task.title} until the linked fix lands or the monitor fires with new evidence.`,
+      }
+      break
+    case 'fix_ready':
+      pseudoResult = {
+        signalId: signal.id,
+        severity: getPriorityRank(task.priority) <= 1 ? 'critical' : 'high',
+        decision: 'escalate',
+        confidence: 0.83,
+        reasoning:
+          'Pseudo AI reproduced the alert and prefers surfacing a bounded fix proposal for engineer review.',
+        suggestedRemediation: `Open a fix proposal for ${task.title} and route it for engineer review.`,
       }
       break
   }
@@ -685,7 +913,10 @@ export function deriveActionForSignal(
         id: actionId,
         signalId: signal.id,
         type: 'ignored',
-        message: `No action taken for ${taskLabel}; the signal was logged for visibility only.`,
+        message:
+          signal.kind === 'known_issue'
+            ? `Stood down on ${taskLabel} because an existing fix already covers this alert.`
+            : `No action taken for ${taskLabel}; the signal was logged for visibility only.`,
         timestamp,
         repeatCount: 1,
       }
@@ -694,7 +925,10 @@ export function deriveActionForSignal(
         id: actionId,
         signalId: signal.id,
         type: 'monitored',
-        message: `Added ${taskLabel} to the watch list for follow-up review.`,
+        message:
+          signal.kind === 'noise_alert'
+            ? `Marked ${taskLabel} for monitor tuning and follow-up observation.`
+            : `Added ${taskLabel} to the watch list for follow-up review.`,
         timestamp,
         repeatCount: 1,
       }
@@ -703,7 +937,10 @@ export function deriveActionForSignal(
         id: actionId,
         signalId: signal.id,
         type: 'escalated',
-        message: `Raised ${taskLabel} for manual review and problematic-state handling.`,
+        message:
+          signal.kind === 'fix_ready'
+            ? `Prepared a reviewable fix proposal for ${taskLabel}.`
+            : `Raised ${taskLabel} for manual review and needs-attention handling.`,
         timestamp,
         repeatCount: 1,
       }

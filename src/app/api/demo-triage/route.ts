@@ -14,7 +14,8 @@ import type {
 } from '@/components/demo/demoData'
 
 const OPENAI_RESPONSES_URL = 'https://api.openai.com/v1/responses'
-const MODEL = process.env.OPENAI_TRIAGE_MODEL ?? 'gpt-4o-mini'
+const MODEL = process.env.OPENAI_TRIAGE_MODEL ?? 'gpt-5.4'
+const REASONING_EFFORT = process.env.OPENAI_TRIAGE_REASONING_EFFORT ?? 'low'
 
 type RouteBody = {
   tasks: DemoTask[]
@@ -172,10 +173,11 @@ function buildPrompt(body: RouteBody) {
   })
 
   return [
-    'You are triaging anomalies in a self-triaging to-do system.',
-    'Rule-based detection has already produced the signals below.',
+    'You are triaging monitor alerts in a self-maintaining production workflow.',
+    'Rule-based detection has already produced the alerts below.',
     'Return JSON only.',
-    'For each signal, classify severity and decision, provide confidence from 0 to 1, concise reasoning, and a short suggested remediation.',
+    'For each alert, classify severity and decision, provide confidence from 0 to 1, concise reasoning, and a short suggested remediation.',
+    'Prefer decisions that distinguish real issues from noise, duplicate-known issues, and reviewable fix proposals.',
     'You may recommend auto_fix only when a deterministic fallback correction seems safe; do not assume you can mutate state directly.',
     'Keep reasoning under 30 words per signal.',
     JSON.stringify({ signals: signalContexts }),
@@ -221,6 +223,8 @@ function buildFallbackResponse(
 }
 
 export async function POST(request: NextRequest) {
+  const requestId = `triage-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  const startedAt = Date.now()
   let body: RouteBody
 
   try {
@@ -239,6 +243,12 @@ export async function POST(request: NextRequest) {
   }
 
   if (body.signals.length === 0) {
+    console.info('[demo-triage]', {
+      requestId,
+      mode: 'fallback',
+      reason: 'no-signals',
+      durationMs: Date.now() - startedAt,
+    })
     return NextResponse.json({
       triage: {},
       mode: 'fallback' as const,
@@ -254,6 +264,13 @@ export async function POST(request: NextRequest) {
   const apiKey = process.env.OPENAI_API_KEY
 
   if (!apiKey) {
+    console.warn('[demo-triage]', {
+      requestId,
+      mode: 'fallback',
+      reason: 'missing-api-key',
+      signalIds: body.signals.map((signal) => signal.id),
+      durationMs: Date.now() - startedAt,
+    })
     return buildFallbackResponse(
       body,
       'No API key was configured, so the deterministic baseline was used.',
@@ -262,6 +279,14 @@ export async function POST(request: NextRequest) {
   }
 
   try {
+    console.info('[demo-triage]', {
+      requestId,
+      mode: 'requesting-ai',
+      model: MODEL,
+      reasoningEffort: REASONING_EFFORT,
+      signalIds: body.signals.map((signal) => signal.id),
+      signalKinds: body.signals.map((signal) => signal.kind),
+    })
     const response = await fetch(OPENAI_RESPONSES_URL, {
       method: 'POST',
       headers: {
@@ -270,6 +295,9 @@ export async function POST(request: NextRequest) {
       },
       body: JSON.stringify({
         model: MODEL,
+        reasoning: {
+          effort: REASONING_EFFORT,
+        },
         input: buildPrompt(body),
         max_output_tokens: 350,
         text: {
@@ -320,6 +348,13 @@ export async function POST(request: NextRequest) {
 
     if (!response.ok) {
       await response.text()
+      console.warn('[demo-triage]', {
+        requestId,
+        mode: 'fallback',
+        reason: 'openai-non-ok',
+        status: response.status,
+        durationMs: Date.now() - startedAt,
+      })
       return buildFallbackResponse(
         body,
         `AI triage was unavailable (${response.status}), so the deterministic baseline was used.`,
@@ -347,6 +382,12 @@ export async function POST(request: NextRequest) {
     }
 
     if (!outputText) {
+      console.warn('[demo-triage]', {
+        requestId,
+        mode: 'fallback',
+        reason: 'empty-output',
+        durationMs: Date.now() - startedAt,
+      })
       return buildFallbackResponse(
         body,
         'The AI response was empty, so the deterministic baseline was used.',
@@ -356,6 +397,12 @@ export async function POST(request: NextRequest) {
     const parsed = normalizeAiBatchResponse(JSON.parse(outputText))
 
     if (!parsed) {
+      console.warn('[demo-triage]', {
+        requestId,
+        mode: 'fallback',
+        reason: 'unparseable-output',
+        durationMs: Date.now() - startedAt,
+      })
       return buildFallbackResponse(
         body,
         'The AI response could not be parsed, so the deterministic baseline was used.',
@@ -383,9 +430,23 @@ export async function POST(request: NextRequest) {
         ]
       }),
     )
-
+    console.info('[demo-triage]', {
+      requestId,
+      mode: 'ai',
+      model: MODEL,
+      reasoningEffort: REASONING_EFFORT,
+      signalIds: body.signals.map((signal) => signal.id),
+      usage,
+      durationMs: Date.now() - startedAt,
+    })
     return NextResponse.json({ triage, mode: 'ai' as const, usage })
   } catch {
+    console.error('[demo-triage]', {
+      requestId,
+      mode: 'fallback',
+      reason: 'request-threw',
+      durationMs: Date.now() - startedAt,
+    })
     return buildFallbackResponse(
       body,
       'The AI request failed, so the deterministic baseline was used.',

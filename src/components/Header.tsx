@@ -1,6 +1,5 @@
 'use client'
 
-import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { useTheme } from 'next-themes'
@@ -16,9 +15,9 @@ import { Container } from '@/components/Container'
 import Avatar from '@/components/Avatar'
 
 const navLinks = [
-  { href: '#', label: 'About' },
-  { href: '#', label: 'Articles' },
-  { href: '#', label: 'Projects' },
+  { href: 'https://paulbarron.dev/about', label: 'About' },
+  { href: 'https://paulbarron.dev/articles', label: 'Articles' },
+  { href: 'https://paulbarron.dev/projects', label: 'Projects' },
 ]
 
 function CloseIcon(props: React.ComponentPropsWithoutRef<'svg'>) {
@@ -85,16 +84,13 @@ function MoonIcon(props: React.ComponentPropsWithoutRef<'svg'>) {
 function ThemeToggle() {
   let { resolvedTheme, setTheme } = useTheme()
   let otherTheme = resolvedTheme === 'dark' ? 'light' : 'dark'
-  let [mounted, setMounted] = useState(false)
-
-  useEffect(() => {
-    setMounted(true)
-  }, [])
 
   return (
     <button
       type="button"
-      aria-label={mounted ? `Switch to ${otherTheme} theme` : 'Toggle theme'}
+      aria-label={
+        resolvedTheme ? `Switch to ${otherTheme} theme` : 'Toggle theme'
+      }
       className="group cursor-pointer rounded-full bg-white/90 px-3 py-2 shadow-lg ring-1 shadow-zinc-800/5 ring-zinc-900/5 backdrop-blur-sm transition dark:bg-zinc-800/90 dark:ring-white/10 dark:hover:ring-white/20"
       onClick={() => setTheme(otherTheme)}
     >
@@ -132,7 +128,13 @@ function MobileNavigation() {
           <ul className="-my-2 divide-y divide-zinc-100 text-base text-zinc-800 dark:divide-zinc-100/5 dark:text-zinc-300">
             {navLinks.map((link) => (
               <li key={link.label}>
-                <PopoverButton as={Link} href={link.href} className="block py-2">
+                <PopoverButton
+                  as={Link}
+                  href={link.href}
+                  className="block py-2"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
                   {link.label}
                 </PopoverButton>
               </li>
@@ -157,6 +159,8 @@ function DesktopNavigation() {
             <li key={link.label}>
               <Link
                 href={link.href}
+                target="_blank"
+                rel="noopener noreferrer"
                 className={clsx(
                   'relative block px-3 py-2 transition',
                   isActive
@@ -176,7 +180,7 @@ function DesktopNavigation() {
 
 export function Header() {
   return (
-    <header className="sticky top-0 z-50 pt-6">
+    <header className="sticky top-0 z-50 py-6 md:fixed md:inset-x-0 md:bg-white/50 md:backdrop-blur-2xl md:supports-[backdrop-filter]:bg-white/40 md:dark:bg-zinc-950/50 md:supports-[backdrop-filter]:dark:bg-zinc-950/40">
       <Container>
         <div className="relative flex items-center justify-between gap-4">
           <div className="pointer-events-auto">

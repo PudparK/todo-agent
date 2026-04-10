@@ -7,15 +7,15 @@ import {
   BoltIcon,
   CheckCircleIcon,
   ChevronDownIcon,
+  Cog6ToothIcon,
   CpuChipIcon,
   EyeIcon,
   FlagIcon,
   MinusCircleIcon,
   PlayIcon,
   ScaleIcon,
-  SparklesIcon,
 } from '@heroicons/react/20/solid'
-import { XMarkIcon } from '@heroicons/react/24/outline'
+import { PencilSquareIcon, XMarkIcon } from '@heroicons/react/24/outline'
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import Badge from '@/components/Badge'
@@ -52,7 +52,6 @@ const statusLabels: Record<TaskStatus, string> = {
   backlog: 'Backlog',
   in_progress: 'In Progress',
   done: 'Done',
-  problematic: 'Problematic',
 }
 
 const statusPanelClasses: Record<TaskStatus, string> = {
@@ -60,9 +59,7 @@ const statusPanelClasses: Record<TaskStatus, string> = {
     'border-zinc-200/65 bg-white dark:border-zinc-700/35 dark:bg-zinc-900/60',
   in_progress:
     'border-blue-200/65 bg-blue-50/70 dark:border-blue-500/20 dark:bg-blue-500/10',
-  done: 'border-green-200/65 bg-green-50/70 dark:border-green-500/20 dark:bg-green-500/10',
-  problematic:
-    'border-red-200/65 bg-red-50/70 dark:border-red-500/20 dark:bg-red-500/10',
+  done: 'border-teal-200/65 bg-teal-50/60 dark:border-teal-500/20 dark:bg-teal-500/10',
 }
 
 const statusBadgeColor: Record<
@@ -71,8 +68,7 @@ const statusBadgeColor: Record<
 > = {
   backlog: 'gray',
   in_progress: 'blue',
-  done: 'green',
-  problematic: 'red',
+  done: 'softTeal',
 }
 
 const signalBadgeColor: Record<
@@ -83,6 +79,9 @@ const signalBadgeColor: Record<
   missing_owner: 'red',
   duplicate_task: 'purple',
   stuck_in_progress: 'blue',
+  noise_alert: 'gray',
+  known_issue: 'gray',
+  fix_ready: 'softTeal',
 }
 
 const severityBadgeColor: Record<
@@ -124,7 +123,7 @@ const triageSourceBadgeColor: Record<
 const triageSourceLabel: Record<NonNullable<DemoTriage['source']>, string> = {
   deterministic: 'Rules-based decision',
   ai: 'Model-assisted decision',
-  fallback: 'Fallback decision',
+  fallback: 'Rules fallback',
 }
 
 const guardrailBadgeColor: Record<
@@ -159,7 +158,9 @@ const decisionToFocusTone: Record<
 }
 
 const MAX_AI_CALLS_PER_SESSION = 8
-const TRIAGE_MODE = 'pseudo' as const
+const TRIAGE_MODE: 'ai' | 'pseudo' = 'ai'
+const ENABLE_FULL_AUDIT_MODE = false
+const HEALTHY_TASK_PREVIEW_LIMIT = 10
 
 type AiUsageSummary = {
   aiCalls: number
@@ -177,9 +178,27 @@ type TimelineEventType =
   | 'decision'
   | 'action'
   | 'complete'
+
+type TimelineDecisionSummary = {
+  classification: 'intervene' | 'watch' | 'benign'
+  reasoning: string
+  confidence?: number
+  source: DemoTriage['source']
+  reviewSummary?: string
+}
+
+type TimelineCompletionSummary = {
+  escalatedCount: number
+  monitoredCount: number
+  healthyCount: number
+  healthyTaskTitles: string[]
+  healthyOverflowCount: number
+}
+
 type TimelineEvent = {
   id: string
   type: TimelineEventType
+  role: 'frame' | 'incident' | 'summary'
   title: string
   description: string
   timestamp: number
@@ -196,6 +215,8 @@ type TimelineEvent = {
     'suggestedRemediation' | 'guardrailStatus' | 'guardrailReason'
   >
   eventAction?: Pick<DemoAction, 'type' | 'message' | 'timestamp'>
+  eventDecision?: TimelineDecisionSummary
+  completionSummary?: TimelineCompletionSummary
 }
 
 let timelineEventSequence = 0
@@ -211,6 +232,14 @@ type NarrativeHeader = {
 }
 type TaskFocusTone = 'neutral' | 'escalate' | 'monitor' | 'stable'
 type BoardRevealQueue = Partial<Record<TaskStatus, string[]>>
+type ActiveTaskPhase =
+  | 'scan'
+  | 'signal'
+  | 'ai_review'
+  | 'evaluating'
+  | 'decision'
+  | 'action_issue'
+  | 'action_pass'
 
 const emptyUsageSummary: AiUsageSummary = {
   aiCalls: 0,
@@ -221,16 +250,15 @@ const emptyUsageSummary: AiUsageSummary = {
   totalTokens: 0,
 }
 
-const SCAN_DELAY_MS = 700
-const BASELINE_DELAY_MS = 2600
-const EVALUATION_DELAY_MS = 1600
-const ACTION_PHASE_DELAY_MS = 900
-const INCIDENT_STAGGER_MIN_MS = 1100
-const INCIDENT_STAGGER_MAX_MS = 1500
+const SCAN_DELAY_MS = 420
+const BASELINE_DELAY_MS = 900
+const EVALUATION_DELAY_MS = 450
+const INCIDENT_STAGGER_MIN_MS = 280
+const INCIDENT_STAGGER_MAX_MS = 520
 const DECISION_STAGGER_MS = 850
 const ACTION_STAGGER_MS = 850
-const BOARD_REVEAL_BEFORE_SIGNAL_MS = 1000
-const BOARD_REVEAL_BEFORE_EVALUATION_MS = 550
+const BOARD_REVEAL_BEFORE_SIGNAL_MS = 180
+const BOARD_REVEAL_BEFORE_EVALUATION_MS = 220
 const TIMELINE_PULSE_MS = 750
 const INCIDENT_BURST_MIN = 5
 const INCIDENT_BURST_MAX = 7
@@ -239,33 +267,33 @@ const basePillClass =
 const subtlePillClass = 'inline-flex items-center rounded-full px-2 text-xs'
 const narrativeCopy = {
   monitoring: {
-    headerTitle: 'Monitoring system state...',
-    headerSubtitle: 'Watching for changes and potential issues',
-    entryTitle: 'Monitoring system state...',
-    entryDetail: 'No issues detected. All tasks within expected range.',
+    headerTitle: 'Monitors active...',
+    headerSubtitle: 'Watching for regressions, drift, and noisy alerts',
+    entryTitle: 'Monitors active...',
+    entryDetail: 'All monitored paths are within expected bounds.',
   },
   signal: {
-    title: 'Signal detected',
+    title: 'Monitor fired',
   },
   evaluating: {
-    headerTitle: 'Evaluating signals...',
-    headerSubtitle: 'Determining severity and required actions',
-    entryTitle: 'Evaluating signals...',
-    entryDetail: 'Determining severity and required actions',
+    headerTitle: 'Investigating alert...',
+    headerSubtitle: 'Reproducing the issue, checking scope, and filtering noise',
+    entryTitle: 'Investigating alert...',
+    entryDetail: 'Reproducing the issue, checking scope, and filtering noise',
   },
   decision: {
-    escalate: 'Decision: Escalate',
-    monitor: 'Decision: Monitor',
-    stable: 'Decision: No change',
+    escalate: 'Decision: Needs intervention',
+    monitor: 'Decision: Keep watching',
+    stable: 'Decision: Benign',
   },
   action: {
-    noChange: 'Action: No change',
-    escalated: 'Action: Escalated',
-    updated: 'Action: Updated',
+    noChange: 'Outcome: No action',
+    escalated: 'Outcome: Escalated',
+    updated: 'Outcome: Monitor updated',
   },
   complete: {
-    headerTitle: 'Triage complete',
-    emptySummary: 'No issues required intervention',
+    headerTitle: 'Sweep complete',
+    emptySummary: 'No alerts required intervention',
   },
 } as const
 
@@ -319,6 +347,14 @@ function applyRandomIncidents(
   tasks: DemoTask[],
   options?: { minIncidents?: number; maxIncidents?: number },
 ) {
+  type IncidentType =
+    | 'missing_owner'
+    | 'task_overdue'
+    | 'stuck_in_progress'
+    | 'duplicate_task'
+    | 'noise_alert'
+    | 'known_issue'
+    | 'fix_ready'
   const nextTasks = tasks.map((task) => ({ ...task }))
   const incidentMessages: string[] = []
   const incidentEvents: Array<{ message: string; taskId: string }> = []
@@ -341,12 +377,33 @@ function applyRandomIncidents(
   const minIncidents = options?.minIncidents ?? 1
   const maxIncidents = options?.maxIncidents ?? 3
   const incidentCount = randomBetween(minIncidents, maxIncidents)
-  const incidentTypes = shuffleItems([
+  const weightedIncidentPool: IncidentType[] = [
+    'missing_owner',
     'missing_owner',
     'task_overdue',
+    'task_overdue',
+    'stuck_in_progress',
     'stuck_in_progress',
     'duplicate_task',
-  ]).slice(0, incidentCount)
+    'noise_alert',
+    'noise_alert',
+    'known_issue',
+    'fix_ready',
+    'fix_ready',
+  ]
+  const incidentTypes: IncidentType[] = []
+
+  for (const incidentType of shuffleItems(weightedIncidentPool)) {
+    if (incidentTypes.includes(incidentType)) {
+      continue
+    }
+
+    incidentTypes.push(incidentType)
+
+    if (incidentTypes.length >= incidentCount) {
+      break
+    }
+  }
 
   for (const incidentType of incidentTypes) {
     if (incidentType === 'missing_owner') {
@@ -419,6 +476,67 @@ function applyRandomIncidents(
       target.ageLabel = `${target.daysInStatus}d active`
       usedTaskIds.add(target.id)
       const message = `Task active for ${target.daysInStatus} days without progress: ${target.title}`
+      incidentMessages.push(message)
+      incidentEvents.push({ message, taskId: target.id })
+      continue
+    }
+
+    if (incidentType === 'noise_alert') {
+      const target =
+        randomTask(
+          (task) =>
+            task.status !== 'done' &&
+            task.monitorDisposition === 'normal' &&
+            task.kind === 'monitoring',
+          usedTaskIds,
+        ) ?? randomTask((task) => task.status !== 'done', usedTaskIds)
+
+      if (!target) continue
+      target.monitorDisposition = 'noise'
+      target.ageLabel = 'Threshold drift detected'
+      usedTaskIds.add(target.id)
+      const message = `Monitor looks noisy under routine traffic: ${target.title}`
+      incidentMessages.push(message)
+      incidentEvents.push({ message, taskId: target.id })
+      continue
+    }
+
+    if (incidentType === 'known_issue') {
+      const target =
+        randomTask(
+          (task) =>
+            task.status !== 'done' &&
+            task.monitorDisposition === 'normal' &&
+            task.kind !== 'content',
+          usedTaskIds,
+        ) ?? randomTask((task) => task.status !== 'done', usedTaskIds)
+
+      if (!target) continue
+      target.monitorDisposition = 'known_issue'
+      target.ageLabel = 'Existing fix linked'
+      usedTaskIds.add(target.id)
+      const message = `Known issue already linked to monitor: ${target.title}`
+      incidentMessages.push(message)
+      incidentEvents.push({ message, taskId: target.id })
+      continue
+    }
+
+    if (incidentType === 'fix_ready') {
+      const target =
+        randomTask(
+          (task) =>
+            task.status !== 'done' &&
+            task.monitorDisposition === 'normal' &&
+            (task.kind === 'latency' || task.kind === 'error_rate'),
+          usedTaskIds,
+        ) ?? randomTask((task) => task.status !== 'done', usedTaskIds)
+
+      if (!target) continue
+      target.monitorDisposition = 'fix_ready'
+      target.priority = target.priority === 'P3' ? 'P2' : target.priority
+      target.ageLabel = 'Reproduced just now'
+      usedTaskIds.add(target.id)
+      const message = `Reproduction succeeded with a fix proposal: ${target.title}`
       incidentMessages.push(message)
       incidentEvents.push({ message, taskId: target.id })
       continue
@@ -537,8 +655,12 @@ function buildActivityEvidence(task: DemoTask) {
     evidence.add('Completed today')
   }
 
-  if (task.status === 'problematic') {
-    evidence.add('Problematic state')
+  if (task.attentionState === 'needs_attention') {
+    evidence.add('Needs attention')
+  }
+
+  if (task.attentionState === 'watch') {
+    evidence.add('Watch list')
   }
 
   return [...evidence]
@@ -575,8 +697,12 @@ function getEvidencePillClass(evidenceItem: string) {
     return 'border-green-300/55 bg-green-50 text-green-700 dark:border-green-500/18 dark:bg-green-500/10 dark:text-green-300'
   }
 
-  if (evidenceItem === 'Problematic state') {
+  if (evidenceItem === 'Needs attention') {
     return 'border-red-300/55 bg-red-50 text-red-700 dark:border-red-500/18 dark:bg-red-500/10 dark:text-red-300'
+  }
+
+  if (evidenceItem === 'Watch list') {
+    return 'border-yellow-300/55 bg-yellow-50 text-yellow-700 dark:border-yellow-500/18 dark:bg-yellow-500/10 dark:text-yellow-300'
   }
 
   return 'border-zinc-200/65 bg-zinc-100 text-zinc-600 dark:border-zinc-700/35 dark:bg-zinc-900 dark:text-zinc-300'
@@ -586,6 +712,21 @@ function buildActivityOutcome(
   decision: TaskPassDecision,
   previousTask: DemoTask,
 ) {
+  if (
+    decision.changed &&
+    decision.nextTask.attentionState !== previousTask.attentionState
+  ) {
+    if (decision.nextTask.attentionState === 'needs_attention') {
+      return 'Marked as needs attention'
+    }
+
+    if (decision.nextTask.attentionState === 'watch') {
+      return 'Added to watch list'
+    }
+
+    return 'Attention state cleared'
+  }
+
   if (decision.changed && decision.nextTask.status !== previousTask.status) {
     const nextStatusLabel =
       decision.nextTask.status === 'in_progress'
@@ -707,11 +848,21 @@ function buildTimelineEvent(
       'suggestedRemediation' | 'guardrailStatus' | 'guardrailReason'
     >
     eventAction?: Pick<DemoAction, 'type' | 'message' | 'timestamp'>
+    eventDecision?: TimelineDecisionSummary
+    completionSummary?: TimelineCompletionSummary
   },
 ): TimelineEvent {
+  const role =
+    type === 'monitoring'
+      ? 'frame'
+      : type === 'complete'
+        ? 'summary'
+        : 'incident'
+
   return {
     id: `narrative-${type}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     type,
+    role,
     title,
     description,
     timestamp: Date.now(),
@@ -725,6 +876,8 @@ function buildTimelineEvent(
     after: options?.after,
     eventTriage: options?.eventTriage,
     eventAction: options?.eventAction,
+    eventDecision: options?.eventDecision,
+    completionSummary: options?.completionSummary,
   }
 }
 
@@ -745,8 +898,7 @@ function projectTaskStateSnapshotForAction(
   if (actionType === 'escalated') {
     return {
       ...snapshot,
-      status: 'Problematic',
-      tags: ['Manual review'],
+      tags: ['Needs attention', 'Manual review'],
     }
   }
 
@@ -847,17 +999,81 @@ function buildDecisionNarrativeLabel(decision: TaskPassDecision) {
   return narrativeCopy.decision.stable
 }
 
+function mapDecisionClassification(
+  tone: TaskPassDecision['tone'],
+): TimelineDecisionSummary['classification'] {
+  if (tone === 'escalate') {
+    return 'intervene'
+  }
+
+  if (tone === 'monitor') {
+    return 'watch'
+  }
+
+  return 'benign'
+}
+
+function buildAiReviewDetail(signal: DemoSignal) {
+  return `${signal.title} was assessed against recent actions, current task context, and safe remediation paths.`
+}
+
+function buildEvaluatingTaskDetail(decision: TaskPassDecision) {
+  return decision.reasoning
+}
+
+function buildDecisionEventSummary(
+  decision: TaskPassDecision,
+  triage: DemoTriage | null,
+  signal: DemoSignal | null,
+): TimelineDecisionSummary {
+  return {
+    classification: mapDecisionClassification(decision.tone),
+    reasoning: triage?.reasoning ?? buildEvaluatingTaskDetail(decision),
+    confidence: triage?.confidence,
+    source: triage?.source ?? 'deterministic',
+    reviewSummary: signal ? buildAiReviewDetail(signal) : undefined,
+  }
+}
+
+function getDecisionConfidenceLabel(confidence?: number) {
+  if (typeof confidence !== 'number') {
+    return null
+  }
+
+  if (confidence < 0.67) {
+    return 'Low confidence'
+  }
+
+  if (confidence < 0.85) {
+    return 'Moderate confidence'
+  }
+
+  return 'High confidence'
+}
+
 function buildActionNarrativeLabel(
   decision: TaskPassDecision,
   previousTask: DemoTask,
 ) {
+  if (previousTask.monitorDisposition === 'known_issue') {
+    return 'Outcome: Stand down'
+  }
+
+  if (decision.nextTask.monitorDisposition === 'fix_ready') {
+    return 'Outcome: Fix proposed'
+  }
+
+  if (decision.nextTask.monitorDisposition === 'noise') {
+    return 'Outcome: Monitor tuned'
+  }
+
   const outcome = buildActivityOutcome(decision, previousTask)
 
   if (outcome === 'No action' || outcome === 'State validated') {
     return narrativeCopy.action.noChange
   }
 
-  if (outcome.includes('Problematic') || decision.tone === 'escalate') {
+  if (outcome.includes('Needs attention') || decision.tone === 'escalate') {
     return narrativeCopy.action.escalated
   }
 
@@ -868,23 +1084,47 @@ function buildActionNarrativeDetail(
   decision: TaskPassDecision,
   previousTask: DemoTask,
 ) {
+  if (previousTask.monitorDisposition === 'known_issue') {
+    return `${decision.nextTask.title} was suppressed because an existing fix already covers this alert`
+  }
+
+  if (decision.nextTask.monitorDisposition === 'fix_ready') {
+    return `${decision.nextTask.title} now has a bounded fix proposal ready for engineer review`
+  }
+
+  if (decision.nextTask.monitorDisposition === 'noise') {
+    return `${decision.nextTask.title} was marked for threshold tuning instead of engineer escalation`
+  }
+
   const outcome = buildActivityOutcome(decision, previousTask)
 
   if (outcome === 'No action' || outcome === 'State validated') {
-    return `${decision.nextTask.title} remains unchanged after evaluation`
+    return `${decision.nextTask.title} remained unchanged after investigation`
   }
 
-  if (decision.nextTask.status === 'problematic') {
-    return `${decision.nextTask.title} moved to Problematic for review`
+  if (decision.nextTask.attentionState === 'needs_attention') {
+    return `${decision.nextTask.title} was routed for review after the alert was confirmed`
   }
 
-  return `${decision.nextTask.title} updated after evaluation`
+  return `${decision.nextTask.title} was updated after investigation`
 }
 
 function deriveTimelineActionType(
   decision: TaskPassDecision,
   previousTask: DemoTask,
 ): DemoAction['type'] {
+  if (previousTask.monitorDisposition === 'known_issue') {
+    return 'ignored'
+  }
+
+  if (decision.nextTask.monitorDisposition === 'fix_ready') {
+    return 'escalated'
+  }
+
+  if (decision.nextTask.monitorDisposition === 'noise') {
+    return 'monitored'
+  }
+
   const actionLabel = buildActionNarrativeLabel(decision, previousTask)
 
   if (actionLabel === narrativeCopy.action.escalated) {
@@ -898,27 +1138,50 @@ function deriveTimelineActionType(
   return 'ignored'
 }
 
-function summarizeCompletion(decisions: TaskPassDecision[]) {
+function buildCompletionSummary(
+  decisions: TaskPassDecision[],
+  healthyTaskTitles: string[],
+): TimelineCompletionSummary {
   const escalatedCount = decisions.filter(
     (decision) => decision.tone === 'escalate',
   ).length
   const monitoredCount = decisions.filter(
     (decision) => decision.tone === 'monitor',
   ).length
+  const healthyCount = healthyTaskTitles.length
 
-  if (escalatedCount > 0 && monitoredCount > 0) {
-    return `${escalatedCount} issue${escalatedCount === 1 ? '' : 's'} escalated, ${monitoredCount} monitored`
+  return {
+    escalatedCount,
+    monitoredCount,
+    healthyCount,
+    healthyTaskTitles: healthyTaskTitles.slice(0, HEALTHY_TASK_PREVIEW_LIMIT),
+    healthyOverflowCount: Math.max(
+      healthyTaskTitles.length - HEALTHY_TASK_PREVIEW_LIMIT,
+      0,
+    ),
+  }
+}
+
+function summarizeCompletion(summary: TimelineCompletionSummary) {
+  const parts: string[] = []
+
+  if (summary.escalatedCount > 0) {
+    parts.push(
+      `${summary.escalatedCount} alert${summary.escalatedCount === 1 ? '' : 's'} escalated`,
+    )
   }
 
-  if (escalatedCount > 0) {
-    return `${escalatedCount} issue${escalatedCount === 1 ? '' : 's'} escalated`
+  if (summary.monitoredCount > 0) {
+    parts.push(
+      `${summary.monitoredCount} alert${summary.monitoredCount === 1 ? '' : 's'} kept under watch`,
+    )
   }
 
-  if (monitoredCount > 0) {
-    return `${monitoredCount} issue${monitoredCount === 1 ? '' : 's'} monitored`
-  }
+  parts.push(
+    `${summary.healthyCount} task${summary.healthyCount === 1 ? '' : 's'} within expected bounds`,
+  )
 
-  return narrativeCopy.complete.emptySummary
+  return parts.join(', ')
 }
 
 function buildNarrativeHeader(phase: 'monitoring' | 'evaluating' | 'complete') {
@@ -942,8 +1205,113 @@ function buildNarrativeHeader(phase: 'monitoring' | 'evaluating' | 'complete') {
   }
 }
 
+function buildSignalNarrativeContent(message: string) {
+  const stuckMatch = message.match(
+    /^Task active for (\d+) days without progress: (.+)$/,
+  )
+
+  if (stuckMatch) {
+    const [, days, taskTitle] = stuckMatch
+
+    return {
+      title: 'Execution stalled',
+      description: `${taskTitle} has been active for ${days} days without progress.`,
+    }
+  }
+
+  const overdueMatch = message.match(/^Overdue task identified: (.+)$/)
+
+  if (overdueMatch) {
+    const [, taskTitle] = overdueMatch
+
+    return {
+      title: 'Expected window breached',
+      description: `${taskTitle} is now overdue and needs review.`,
+    }
+  }
+
+  const missingOwnerMatch = message.match(
+    /^Overdue task with no assigned owner: (.+)$/,
+  )
+
+  if (missingOwnerMatch) {
+    const [, taskTitle] = missingOwnerMatch
+
+    return {
+      title: 'Unowned overdue work',
+      description: `${taskTitle} is overdue and currently has no owner.`,
+    }
+  }
+
+  const ownerMatch = message.match(/^Task has no assigned owner: (.+)$/)
+
+  if (ownerMatch) {
+    const [, taskTitle] = ownerMatch
+
+    return {
+      title: 'Ownership gap',
+      description: `${taskTitle} is active without an assigned owner.`,
+    }
+  }
+
+  const duplicateMatch = message.match(/^Duplicate task identified in backlog: (.+)$/)
+
+  if (duplicateMatch) {
+    const [, taskTitle] = duplicateMatch
+
+    return {
+      title: 'Duplicate work detected',
+      description: `${taskTitle} appears more than once in active work.`,
+    }
+  }
+
+  const noiseMatch = message.match(/^Monitor looks noisy under routine traffic: (.+)$/)
+
+  if (noiseMatch) {
+    const [, taskTitle] = noiseMatch
+
+    return {
+      title: 'Alert noise detected',
+      description: `${taskTitle} is firing on routine traffic and should be tuned before it pages again.`,
+    }
+  }
+
+  const knownIssueMatch = message.match(
+    /^Known issue already linked to monitor: (.+)$/,
+  )
+
+  if (knownIssueMatch) {
+    const [, taskTitle] = knownIssueMatch
+
+    return {
+      title: 'Existing incident resurfaced',
+      description: `${taskTitle} overlaps with a tracked issue and should be checked before opening a new response.`,
+    }
+  }
+
+  const fixReadyMatch = message.match(
+    /^Reproduction succeeded with a fix proposal: (.+)$/,
+  )
+
+  if (fixReadyMatch) {
+    const [, taskTitle] = fixReadyMatch
+
+    return {
+      title: 'Issue reproduced',
+      description: `${taskTitle} reproduced reliably in the current workflow and is ready for classification.`,
+    }
+  }
+
+  return {
+    title: narrativeCopy.signal.title,
+    description: message,
+  }
+}
+
 function buildSignalNarrativeEntry(message: string) {
-  return buildTimelineEvent('signal', narrativeCopy.signal.title, message)
+  const narrative = buildSignalNarrativeContent(message)
+
+  return buildTimelineEvent('signal', narrative.title, narrative.description)
 }
 
 function buildMonitoringNarrativeEntry() {
@@ -954,17 +1322,62 @@ function buildMonitoringNarrativeEntry() {
   )
 }
 
-function buildEvaluatingNarrativeEntry() {
+function buildPassedScanNarrative(task: DemoTask) {
   return buildTimelineEvent(
-    'evaluating',
-    narrativeCopy.evaluating.entryTitle,
-    narrativeCopy.evaluating.entryDetail,
+    'action',
+    'No issue detected',
+    `${task.title} stayed within expected bounds for this sweep.`,
+    {
+      taskId: task.id,
+      decisionTone: 'stable',
+      eventAction: {
+        type: 'ignored',
+        message: `${task.title} did not require intervention during this sweep.`,
+        timestamp: 'During this sweep',
+      },
+    },
   )
+}
+
+function buildCompletionNarrativeEntry(summary: TimelineCompletionSummary) {
+  return buildTimelineEvent(
+    'complete',
+    narrativeCopy.complete.headerTitle,
+    summarizeCompletion(summary),
+    {
+      completionSummary: summary,
+    },
+  )
+}
+
+function getDecisionSourceCopy(
+  source: DemoTriage['source'],
+  isPending = false,
+) {
+  if (isPending) {
+    return 'Waiting on the model response.'
+  }
+
+  if (source === 'fallback') {
+    return 'A fallback rule supplied this decision.'
+  }
+
+  if (source === 'ai') {
+    return TRIAGE_MODE === 'pseudo'
+      ? 'A local simulated model supplied this decision.'
+      : 'A live model contributed to this decision.'
+  }
+
+  return 'A deterministic rules layer supplied this decision.'
 }
 
 function getActionEventVisualTone(entry: TimelineEvent) {
   if (entry.type !== 'action') {
     return 'neutral' as const
+  }
+
+  if (entry.title === 'No issue detected') {
+    return 'stable' as const
   }
 
   const actionType = entry.eventAction?.type
@@ -1004,7 +1417,17 @@ function getTimelineEventGlowClasses(
   entry: TimelineEvent,
   isSelected: boolean,
 ) {
+  if (entry.role === 'frame') {
+    return isSelected
+      ? 'shadow-[0_0_24px_-12px_rgba(113,113,122,0.18)] dark:shadow-[0_0_28px_-14px_rgba(24,24,27,0.5)]'
+      : 'shadow-none'
+  }
+
   if (!isSelected) {
+    if (entry.title === 'No issue detected') {
+      return 'shadow-[0_0_14px_-14px_rgba(34,197,94,0.18)] dark:shadow-[0_0_18px_-16px_rgba(34,197,94,0.1)]'
+    }
+
     return 'shadow-[0_0_18px_-12px_rgba(15,23,42,0.3)] dark:shadow-[0_0_24px_-14px_rgba(0,0,0,0.65)]'
   }
 
@@ -1027,7 +1450,7 @@ function getTimelineEventGlowClasses(
   }
 
   if (tone === 'stable') {
-    return 'shadow-[0_0_36px_-10px_rgba(34,197,94,0.32)] dark:shadow-[0_0_40px_-12px_rgba(34,197,94,0.26)]'
+    return 'shadow-[0_0_34px_-10px_rgba(20,184,166,0.3)] dark:shadow-[0_0_38px_-12px_rgba(20,184,166,0.24)]'
   }
 
   return 'shadow-[0_0_30px_-10px_rgba(113,113,122,0.28)] dark:shadow-[0_0_34px_-12px_rgba(24,24,27,0.62)]'
@@ -1038,7 +1461,11 @@ function getTimelineEventToneClasses(
   isSelected: boolean,
 ) {
   const base =
-    entry.type === 'signal'
+    entry.role === 'frame'
+      ? isSelected
+        ? 'border-zinc-200/80 bg-zinc-50/95 dark:border-zinc-700/35 dark:bg-zinc-950/80'
+        : 'border-zinc-200/55 bg-zinc-50/70 dark:border-zinc-800/55 dark:bg-zinc-950/65'
+      : entry.type === 'signal'
       ? isSelected
         ? 'border-amber-300/95 bg-white dark:border-amber-400/40 dark:bg-zinc-950'
         : 'border-amber-200/65 bg-white dark:border-amber-500/18 dark:bg-zinc-950'
@@ -1050,18 +1477,26 @@ function getTimelineEventToneClasses(
           ? isSelected
             ? 'border-indigo-300/95 bg-white dark:border-indigo-400/40 dark:bg-zinc-950'
             : 'border-indigo-200/65 bg-white dark:border-indigo-500/18 dark:bg-zinc-950'
-          : entry.type === 'action'
-            ? getActionEventVisualTone(entry) === 'escalate'
+        : entry.type === 'action'
+            ? entry.title === 'No issue detected'
+            ? isSelected
+              ? 'border-green-200/70 bg-white dark:border-green-500/20 dark:bg-zinc-950'
+              : 'border-zinc-200/65 bg-white dark:border-zinc-700/25 dark:bg-zinc-950'
+            : entry.title === 'No issue detected'
+              ? isSelected
+                ? 'border-green-200/70 bg-white dark:border-green-500/20 dark:bg-zinc-950'
+                : 'border-zinc-200/65 bg-white dark:border-zinc-700/25 dark:bg-zinc-950'
+              : getActionEventVisualTone(entry) === 'escalate'
               ? isSelected
                 ? 'border-red-300/95 bg-white dark:border-red-400/40 dark:bg-zinc-950'
                 : 'border-red-200/65 bg-white dark:border-red-500/18 dark:bg-zinc-950'
               : getActionEventVisualTone(entry) === 'stable'
-                ? isSelected
-                  ? 'border-green-300/95 bg-white dark:border-green-400/40 dark:bg-zinc-950'
-                  : 'border-green-200/65 bg-white dark:border-green-500/18 dark:bg-zinc-950'
-                : isSelected
-                  ? 'border-zinc-300/95 bg-white dark:border-zinc-500/45 dark:bg-zinc-950'
-                  : 'border-zinc-300/75 bg-white dark:border-zinc-500/28 dark:bg-zinc-950'
+      ? isSelected
+        ? 'border-teal-300/95 bg-white dark:border-teal-400/40 dark:bg-zinc-950'
+        : 'border-teal-200/45 bg-white/95 dark:border-teal-500/14 dark:bg-zinc-950'
+      : isSelected
+        ? 'border-zinc-300/95 bg-white dark:border-zinc-500/45 dark:bg-zinc-950'
+        : 'border-zinc-300/75 bg-white dark:border-zinc-500/28 dark:bg-zinc-950'
             : entry.type === 'complete'
               ? isSelected
                 ? 'border-zinc-300/95 bg-white dark:border-zinc-500/45 dark:bg-zinc-950'
@@ -1091,6 +1526,22 @@ function getTimelineEventIcon(entry: TimelineEvent) {
   }
 
   if (entry.type === 'action') {
+    if (entry.title === 'No issue detected') {
+      return CheckCircleIcon
+    }
+
+    if (entry.title === 'Outcome: Monitor tuned') {
+      return Cog6ToothIcon
+    }
+
+    if (entry.title === 'Outcome: Stand down') {
+      return MinusCircleIcon
+    }
+
+    if (entry.title === 'Outcome: Fix proposed') {
+      return PencilSquareIcon
+    }
+
     if (entry.decisionTone === 'escalate') {
       return FlagIcon
     }
@@ -1108,6 +1559,10 @@ function renderTimelineEventIcon(entry: TimelineEvent) {
 }
 
 function getTimelineEventIconClasses(entry: TimelineEvent) {
+  if (entry.role === 'frame') {
+    return 'bg-zinc-100 text-zinc-600 dark:bg-zinc-900 dark:text-zinc-300'
+  }
+
   if (entry.type === 'signal') {
     return 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300'
   }
@@ -1121,10 +1576,18 @@ function getTimelineEventIconClasses(entry: TimelineEvent) {
   }
 
   if (entry.type === 'action') {
-    return getActionEventVisualTone(entry) === 'escalate'
+    return entry.title === 'No issue detected'
+      ? 'bg-green-100/55 text-green-700 dark:bg-green-500/8 dark:text-green-300'
+      : entry.title === 'Outcome: Monitor tuned'
+        ? 'bg-teal-100 text-teal-700 dark:bg-teal-500/15 dark:text-teal-300'
+      : entry.title === 'Outcome: Stand down'
+        ? 'bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-200'
+      : entry.title === 'Outcome: Fix proposed'
+        ? 'bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300'
+      : getActionEventVisualTone(entry) === 'escalate'
       ? 'bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-300'
       : getActionEventVisualTone(entry) === 'stable'
-        ? 'bg-green-100 text-green-700 dark:bg-green-500/15 dark:text-green-300'
+        ? 'bg-teal-100 text-teal-700 dark:bg-teal-500/15 dark:text-teal-300'
         : 'bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-200'
   }
 
@@ -1137,6 +1600,10 @@ function getTimelineEventIconClasses(entry: TimelineEvent) {
 
 function getTimelineEventFocusTone(entry: TimelineEvent | null): TaskFocusTone {
   if (!entry) {
+    return 'neutral'
+  }
+
+  if (entry.role !== 'incident') {
     return 'neutral'
   }
 
@@ -1161,9 +1628,88 @@ function TimelineEventDetails({
   onSelectSignal,
 }: {
   entry: TimelineEvent
-  insightContext: TaskInsightContext
+  insightContext: TaskInsightContext | null
   onSelectSignal: (signalId: string) => void
 }) {
+  if (entry.type === 'complete') {
+    const summary = entry.completionSummary
+
+    if (!summary) {
+      return (
+        <div className="border-t border-zinc-200/55 px-4 py-4 text-sm text-zinc-600 dark:border-zinc-800/55 dark:text-zinc-400">
+          No sweep summary details are available yet.
+        </div>
+      )
+    }
+
+    return (
+      <div className="space-y-3 border-t border-zinc-200/55 px-4 py-4 dark:border-zinc-800/55">
+        <div className="grid gap-3 sm:grid-cols-3">
+          <div className="rounded-xl border border-zinc-200/65 bg-zinc-50/80 p-3 dark:border-zinc-700/25 dark:bg-zinc-900/40">
+            <p className="text-[11px] font-medium tracking-wide text-zinc-500 uppercase dark:text-zinc-400">
+              Escalated
+            </p>
+            <p className="mt-1 text-sm font-medium text-zinc-900 dark:text-zinc-100">
+              {summary.escalatedCount}
+            </p>
+          </div>
+          <div className="rounded-xl border border-zinc-200/65 bg-zinc-50/80 p-3 dark:border-zinc-700/25 dark:bg-zinc-900/40">
+            <p className="text-[11px] font-medium tracking-wide text-zinc-500 uppercase dark:text-zinc-400">
+              Under watch
+            </p>
+            <p className="mt-1 text-sm font-medium text-zinc-900 dark:text-zinc-100">
+              {summary.monitoredCount}
+            </p>
+          </div>
+          <div className="rounded-xl border border-zinc-200/65 bg-zinc-50/80 p-3 dark:border-zinc-700/25 dark:bg-zinc-900/40">
+            <p className="text-[11px] font-medium tracking-wide text-zinc-500 uppercase dark:text-zinc-400">
+              Healthy
+            </p>
+            <p className="mt-1 text-sm font-medium text-zinc-900 dark:text-zinc-100">
+              {summary.healthyCount}
+            </p>
+          </div>
+        </div>
+        <div className="rounded-xl border border-zinc-200/65 bg-zinc-50/80 p-3 dark:border-zinc-700/25 dark:bg-zinc-900/40">
+          <p className="text-[11px] font-medium tracking-wide text-zinc-500 uppercase dark:text-zinc-400">
+            Tasks that passed checks
+          </p>
+          {summary.healthyTaskTitles.length > 0 ? (
+            <div className="mt-2 space-y-2">
+              <div className="space-y-1.5">
+                {summary.healthyTaskTitles.map((taskTitle) => (
+                  <div
+                    key={taskTitle}
+                    className="rounded-lg border border-zinc-200/60 bg-white/70 px-3 py-2 text-sm text-zinc-700 dark:border-zinc-700/30 dark:bg-zinc-950/40 dark:text-zinc-300"
+                  >
+                    {taskTitle}
+                  </div>
+                ))}
+              </div>
+              {summary.healthyOverflowCount > 0 ? (
+                <p className="text-sm text-zinc-600 dark:text-zinc-400">
+                  +{summary.healthyOverflowCount} more tasks cleared this sweep.
+                </p>
+              ) : null}
+            </div>
+          ) : (
+            <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+              No healthy-task detail was recorded for this sweep.
+            </p>
+          )}
+        </div>
+      </div>
+    )
+  }
+
+  if (!insightContext) {
+    return (
+      <div className="border-t border-zinc-200/55 px-4 py-4 text-sm text-zinc-600 dark:border-zinc-800/55 dark:text-zinc-400">
+        No detail is available for this entry.
+      </div>
+    )
+  }
+
   const {
     task,
     signals,
@@ -1172,76 +1718,63 @@ function TimelineEventDetails({
     primaryAction,
     isAiPending,
   } = insightContext
+  const displaySignal =
+    primarySignal ??
+    (entry.signalId
+      ? signals.find((signal) => signal.id === entry.signalId) ?? null
+      : null)
+  const decisionSource = entry.eventDecision?.source ?? primaryTriage?.source
+  const decisionConfidence =
+    entry.eventDecision?.confidence ?? primaryTriage?.confidence
+  const decisionReasoning = entry.eventDecision?.reasoning ?? primaryTriage?.reasoning
+  const decisionReviewSummary = entry.eventDecision?.reviewSummary
 
   if (entry.type === 'decision') {
     return (
       <div className="space-y-3 border-t border-zinc-200/55 px-4 py-4 dark:border-zinc-800/55">
-        <div className="flex flex-wrap gap-2">
-          {primaryTriage ? (
-            <>
-              <DemoBadge color={triageSourceBadgeColor[primaryTriage.source]}>
-                {triageSourceLabel[primaryTriage.source]}
-              </DemoBadge>
-              <DemoBadge color={severityBadgeColor[primaryTriage.severity]}>
-                {primaryTriage.severity}
-              </DemoBadge>
-            </>
-          ) : null}
-          {isAiPending ? <DemoBadge color="gray">AI thinking</DemoBadge> : null}
-        </div>
-        {primarySignal ? (
+        {displaySignal ? (
           <button
             type="button"
-            onClick={() => onSelectSignal(primarySignal.id)}
+            onClick={() => onSelectSignal(displaySignal.id)}
             className="w-full rounded-xl border border-zinc-200/65 bg-zinc-50/80 p-3 text-left transition hover:border-zinc-300/75 hover:bg-zinc-100/80 dark:border-zinc-700/25 dark:bg-zinc-900/40 dark:hover:border-zinc-600/45 dark:hover:bg-zinc-900/60"
           >
             <p className="text-[11px] font-medium tracking-wide text-zinc-500 uppercase dark:text-zinc-400">
-              Detected signal
+              Alert context
             </p>
             <p className="mt-1 text-sm font-medium text-zinc-900 dark:text-zinc-100">
-              {primarySignal.title}
+              {displaySignal.title}
             </p>
             <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-              {primarySignal.summary}
+              {displaySignal.summary}
             </p>
           </button>
         ) : null}
-        {primaryTriage ? (
+        {primaryTriage || entry.eventDecision ? (
           <>
             <div className="rounded-xl border border-zinc-200/65 bg-zinc-50/80 p-3 dark:border-zinc-700/25 dark:bg-zinc-900/40">
               <p className="text-[11px] font-medium tracking-wide text-zinc-500 uppercase dark:text-zinc-400">
-                Why the system decided this
+                Classification basis
               </p>
               <p className="mt-1 text-sm font-medium text-zinc-900 dark:text-zinc-100">
-                {primaryTriage.expectationViolated}
+                {primaryTriage?.expectationViolated ??
+                  'This incident breached the expected workflow threshold for the selected response.'}
               </p>
               <p className="mt-2 text-sm text-zinc-700 dark:text-zinc-300">
-                {primaryTriage.reasoning}
+                {decisionReasoning ??
+                  'No classification reasoning was recorded for this decision.'}
               </p>
             </div>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div className="rounded-xl border border-zinc-200/65 bg-zinc-50/80 p-3 dark:border-zinc-700/25 dark:bg-zinc-900/40">
-                <p className="text-[11px] font-medium tracking-wide text-zinc-500 uppercase dark:text-zinc-400">
-                  Confidence
-                </p>
-                <p className="mt-1 text-sm font-medium text-zinc-900 dark:text-zinc-100">
-                  {Math.round(primaryTriage.confidence * 100)}%
-                </p>
-              </div>
-              <div className="rounded-xl border border-zinc-200/65 bg-zinc-50/80 p-3 dark:border-zinc-700/25 dark:bg-zinc-900/40">
-                <p className="text-[11px] font-medium tracking-wide text-zinc-500 uppercase dark:text-zinc-400">
-                  Decision source
-                </p>
-                <p className="mt-1 text-sm text-zinc-700 dark:text-zinc-300">
-                  {isAiPending
-                    ? 'Waiting on the model response.'
-                    : primaryTriage.source === 'fallback'
-                      ? 'A fallback rule supplied this decision.'
-                      : TRIAGE_MODE === 'pseudo'
-                        ? 'A local simulated model supplied this decision.'
-                        : 'A live model contributed to this decision.'}
-                </p>
-              </div>
+            <div className="rounded-xl border border-zinc-200/65 bg-zinc-50/80 p-3 dark:border-zinc-700/25 dark:bg-zinc-900/40">
+              <p className="text-[11px] font-medium tracking-wide text-zinc-500 uppercase dark:text-zinc-400">
+                Review context
+              </p>
+              <p className="mt-1 text-sm font-medium text-zinc-900 dark:text-zinc-100">
+                {entry.title.replace('Decision: ', '')}
+              </p>
+              <p className="mt-2 text-sm text-zinc-700 dark:text-zinc-300">
+                {decisionReviewSummary ??
+                  'No extra review context was recorded for this decision.'}
+              </p>
             </div>
           </>
         ) : (
@@ -1252,7 +1785,7 @@ function TimelineEventDetails({
         {signals.length > 1 ? (
           <div className="space-y-2">
             <p className="text-[11px] font-medium tracking-wide text-zinc-500 uppercase dark:text-zinc-400">
-              Related signals
+              Supporting signals
             </p>
             {signals.map((signal) => (
               <button
@@ -1275,6 +1808,35 @@ function TimelineEventDetails({
             ))}
           </div>
         ) : null}
+        {(primaryTriage || decisionConfidence !== undefined || isAiPending) ? (
+          <div className="rounded-xl border border-zinc-200/65 bg-zinc-50/80 p-3 dark:border-zinc-700/25 dark:bg-zinc-900/40">
+            <p className="text-[11px] font-medium tracking-wide text-zinc-500 uppercase dark:text-zinc-400">
+              Decision metadata
+            </p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {primaryTriage ? (
+                <>
+                  <DemoBadge color={triageSourceBadgeColor[primaryTriage.source]}>
+                    {triageSourceLabel[primaryTriage.source]}
+                  </DemoBadge>
+                  <DemoBadge color={severityBadgeColor[primaryTriage.severity]}>
+                    {primaryTriage.severity}
+                  </DemoBadge>
+                </>
+              ) : null}
+              {decisionConfidence !== undefined ? (
+                <DemoBadge color="gray">
+                  {getDecisionConfidenceLabel(decisionConfidence) ??
+                    `${Math.round(decisionConfidence * 100)}% confidence`}
+                </DemoBadge>
+              ) : null}
+              {isAiPending ? <DemoBadge color="gray">AI thinking</DemoBadge> : null}
+            </div>
+            <p className="mt-3 text-sm text-zinc-700 dark:text-zinc-300">
+              {getDecisionSourceCopy(decisionSource ?? 'deterministic', isAiPending)}
+            </p>
+          </div>
+        ) : null}
       </div>
     )
   }
@@ -1295,13 +1857,19 @@ function TimelineEventDetails({
               after: projectTaskStateSnapshotForAction(
                 baselineTask,
                 primaryAction?.type ??
-                  (entry.title.includes('Escalated')
-                    ? 'escalated'
-                    : entry.title.includes('Updated')
-                      ? 'monitored'
-                      : entry.title.includes('No change')
+                  (entry.title.includes('Monitor tuned')
+                    ? 'monitored'
+                    : entry.title.includes('Fix proposed')
+                      ? 'escalated'
+                      : entry.title.includes('Stand down')
                         ? 'ignored'
-                        : 'ignored'),
+                        : entry.title.includes('Escalated')
+                          ? 'escalated'
+                          : entry.title.includes('Updated')
+                            ? 'monitored'
+                            : entry.title.includes('No change')
+                              ? 'ignored'
+                              : 'ignored'),
               ),
             }
           })()
@@ -1314,20 +1882,55 @@ function TimelineEventDetails({
     entry.after ??
     projectedActionDiff?.after ??
     (task ? captureTaskStateSnapshot(task) : null)
-  const actionTriage = entry.eventTriage ?? {
-    suggestedRemediation: primaryTriage?.suggestedRemediation,
-    guardrailStatus: primaryTriage?.guardrailStatus,
-    guardrailReason: primaryTriage?.guardrailReason,
-  }
-  const actionSummary =
-    entry.eventAction ??
-    (primaryAction
-      ? {
-          type: primaryAction.type,
-          message: primaryAction.message,
-          timestamp: primaryAction.timestamp,
-        }
-      : null)
+  const actionTriage = entry.eventTriage ?? null
+  const actionSummary = entry.eventAction ?? null
+  const isMonitorTuned = entry.title === 'Outcome: Monitor tuned'
+  const isStandDown = entry.title === 'Outcome: Stand down'
+  const isNoAction = entry.title === 'Outcome: No action'
+  const isFixProposed = entry.title === 'Outcome: Fix proposed'
+  const isLightweightActionDetail =
+    actionSummary?.type === 'monitored' || actionSummary?.type === 'ignored'
+  const guardrailStatus = actionTriage?.guardrailStatus
+  const shouldShowGuardrailBadge =
+    !!guardrailStatus &&
+    !(guardrailStatus === 'not_needed' && isLightweightActionDetail)
+  const lightweightSuggestedLabel = isMonitorTuned
+    ? 'Threshold change'
+    : isStandDown
+      ? 'Existing fix path'
+      : isNoAction
+        ? 'Next evaluation window'
+      : 'Suggested next step'
+  const lightweightWhyLabel = isMonitorTuned
+    ? 'Why this looked like noise'
+    : isStandDown
+      ? 'Why no new action'
+      : isNoAction
+        ? 'Why no action was taken'
+      : 'Why this action happened'
+  const lightweightOutcomeLabel = isMonitorTuned
+    ? 'Next evaluation window'
+    : isStandDown
+      ? 'Re-alert conditions'
+      : isNoAction
+        ? 'Current state'
+      : 'What happened'
+  const lightweightSuggestedDetail = isNoAction
+    ? 'No further action was taken during this sweep. Re-alert only if the signal persists or worsens in a later pass.'
+    : actionTriage?.suggestedRemediation
+  const lightweightOutcomeDetail = isMonitorTuned
+    ? 'Re-alert only if the signal persists after the tuned threshold is applied in a later sweep.'
+    : isStandDown
+      ? 'Alert again only if fresh evidence appears after the linked fix lands or the issue changes shape.'
+      : isNoAction
+        ? 'The task remained unchanged after review.'
+      : actionSummary?.message ?? 'No resulting change was logged for this item.'
+  const richSuggestedLabel = isFixProposed
+    ? 'Proposed fix'
+    : 'Suggested next step'
+  const richOutcomeLabel = isFixProposed
+    ? 'What ships next'
+    : 'What happened'
   const diffFields =
     beforeSnapshot && afterSnapshot
       ? getChangedTaskSnapshotFields(beforeSnapshot, afterSnapshot)
@@ -1337,13 +1940,118 @@ function TimelineEventDetails({
       ? getVisibleTaskSnapshotFields(beforeSnapshot, afterSnapshot)
       : (['status', 'owner'] as Array<keyof TaskStateSnapshot>)
 
+  if (isLightweightActionDetail) {
+    return (
+      <div className="space-y-3 border-t border-zinc-200/55 px-4 py-4 dark:border-zinc-800/55">
+        {lightweightSuggestedDetail ? (
+          <div className="rounded-xl border border-zinc-200/65 bg-zinc-50/80 p-3 dark:border-zinc-700/25 dark:bg-zinc-900/40">
+            <p className="text-[11px] font-medium tracking-wide text-zinc-500 uppercase dark:text-zinc-400">
+              {lightweightSuggestedLabel}
+            </p>
+            <p className="mt-1 text-sm font-medium text-zinc-900 dark:text-zinc-100">
+              {lightweightSuggestedDetail}
+            </p>
+          </div>
+        ) : null}
+        <div className="rounded-xl border border-zinc-200/65 bg-zinc-50/80 p-3 dark:border-zinc-700/25 dark:bg-zinc-900/40">
+          <p className="text-[11px] font-medium tracking-wide text-zinc-500 uppercase dark:text-zinc-400">
+            {lightweightOutcomeLabel}
+          </p>
+          {actionSummary ? (
+            <div className="mt-1 space-y-2">
+              <DemoBadge color={actionBadgeColor[actionSummary.type]}>
+                {actionSummary.type}
+              </DemoBadge>
+              <p className="text-sm text-zinc-700 dark:text-zinc-300">
+                {lightweightOutcomeDetail}
+              </p>
+              <p className="text-[11px] font-medium tracking-wide text-zinc-500 uppercase dark:text-zinc-400">
+                {actionSummary.timestamp}
+              </p>
+            </div>
+          ) : (
+            <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+              No resulting change was logged for this item.
+            </p>
+          )}
+        </div>
+      </div>
+    )
+  }
+
+  if (isFixProposed) {
+    return (
+      <div className="space-y-3 border-t border-zinc-200/55 px-4 py-4 dark:border-zinc-800/55">
+        <div className="rounded-xl border border-zinc-200/65 bg-zinc-50/80 p-3 dark:border-zinc-700/25 dark:bg-zinc-900/40">
+          <p className="text-[11px] font-medium tracking-wide text-zinc-500 uppercase dark:text-zinc-400">
+            Reproduction status
+          </p>
+          <p className="mt-1 text-sm font-medium text-zinc-900 dark:text-zinc-100">
+            The alert reproduced cleanly in a reviewable workflow.
+          </p>
+          <p className="mt-2 text-sm text-zinc-700 dark:text-zinc-300">
+            {entry.decision?.reasoning ??
+              actionWhyDetail}
+          </p>
+        </div>
+        <div className="rounded-xl border border-zinc-200/65 bg-zinc-50/80 p-3 dark:border-zinc-700/25 dark:bg-zinc-900/40">
+          <p className="text-[11px] font-medium tracking-wide text-zinc-500 uppercase dark:text-zinc-400">
+            Proposed fix
+          </p>
+          <p className="mt-1 text-sm font-medium text-zinc-900 dark:text-zinc-100">
+            {actionTriage?.suggestedRemediation ??
+              'A bounded fix proposal is ready for engineer review.'}
+          </p>
+        </div>
+          <div className="rounded-xl border border-zinc-200/65 bg-zinc-50/80 p-3 dark:border-zinc-700/25 dark:bg-zinc-900/40">
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-[11px] font-medium tracking-wide text-zinc-500 uppercase dark:text-zinc-400">
+                Review requirement
+            </p>
+            {shouldShowGuardrailBadge ? (
+              <DemoBadge color={guardrailBadgeColor[guardrailStatus!]}>
+                {guardrailLabel[guardrailStatus!]}
+              </DemoBadge>
+            ) : null}
+          </div>
+          <p className="mt-1 text-sm text-zinc-700 dark:text-zinc-300">
+            {actionTriage?.guardrailReason ??
+              'Engineer review is required before the proposal can be accepted.'}
+          </p>
+        </div>
+        <div className="rounded-xl border border-zinc-200/65 bg-zinc-50/80 p-3 dark:border-zinc-700/25 dark:bg-zinc-900/40">
+          <p className="text-[11px] font-medium tracking-wide text-zinc-500 uppercase dark:text-zinc-400">
+            What ships next
+          </p>
+          {actionSummary ? (
+            <div className="mt-1 space-y-2">
+              <DemoBadge color={actionBadgeColor[actionSummary.type]}>
+                {actionSummary.type}
+              </DemoBadge>
+              <p className="text-sm text-zinc-700 dark:text-zinc-300">
+                {actionSummary.message}
+              </p>
+              <p className="text-[11px] font-medium tracking-wide text-zinc-500 uppercase dark:text-zinc-400">
+                {actionSummary.timestamp}
+              </p>
+            </div>
+          ) : (
+            <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+              No resulting change was logged for this item.
+            </p>
+          )}
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="space-y-3 border-t border-zinc-200/55 px-4 py-4 dark:border-zinc-800/55">
       {actionTriage ? (
         <>
           <div className="rounded-xl border border-zinc-200/65 bg-zinc-50/80 p-3 dark:border-zinc-700/25 dark:bg-zinc-900/40">
             <p className="text-[11px] font-medium tracking-wide text-zinc-500 uppercase dark:text-zinc-400">
-              Suggested next step
+              {richSuggestedLabel}
             </p>
             <p className="mt-1 text-sm font-medium text-zinc-900 dark:text-zinc-100">
               {actionTriage.suggestedRemediation ??
@@ -1353,26 +2061,24 @@ function TimelineEventDetails({
           <div className="rounded-xl border border-zinc-200/65 bg-zinc-50/80 p-3 dark:border-zinc-700/25 dark:bg-zinc-900/40">
             <div className="flex items-center justify-between gap-3">
               <p className="text-[11px] font-medium tracking-wide text-zinc-500 uppercase dark:text-zinc-400">
-                Why this action happened
+                Guardrail note
               </p>
-              {actionTriage.guardrailStatus ? (
-                <DemoBadge
-                  color={guardrailBadgeColor[actionTriage.guardrailStatus]}
-                >
-                  {guardrailLabel[actionTriage.guardrailStatus]}
+              {shouldShowGuardrailBadge ? (
+                <DemoBadge color={guardrailBadgeColor[guardrailStatus!]}>
+                  {guardrailLabel[guardrailStatus!]}
                 </DemoBadge>
               ) : null}
             </div>
             <p className="mt-1 text-sm text-zinc-700 dark:text-zinc-300">
               {actionTriage.guardrailReason ??
-                'No additional action rule was recorded.'}
+                'No additional guardrail note was recorded for this outcome.'}
             </p>
           </div>
         </>
       ) : null}
       <div className="rounded-xl border border-zinc-200/65 bg-zinc-50/80 p-3 dark:border-zinc-700/25 dark:bg-zinc-900/40">
         <p className="text-[11px] font-medium tracking-wide text-zinc-500 uppercase dark:text-zinc-400">
-          What happened
+          {richOutcomeLabel}
         </p>
         {actionSummary ? (
           <div className="mt-1 space-y-2">
@@ -1516,9 +2222,18 @@ function TimelineEventRow({
 }) {
   const rowRef = useRef<HTMLLIElement | null>(null)
   const cardRef = useRef<HTMLDivElement | null>(null)
+  const isLightweightPassEntry =
+    entry.type === 'action' && entry.title === 'No issue detected'
+  const decisionConfidenceLabel =
+    entry.type === 'decision'
+      ? getDecisionConfidenceLabel(
+          insightContext?.primaryTriage?.confidence ?? entry.eventDecision?.confidence,
+        )
+      : null
   const isExpandable =
-    (entry.type === 'decision' || entry.type === 'action') &&
-    insightContext !== null
+    (entry.type === 'decision' ||
+      (entry.type === 'action' && !isLightweightPassEntry && insightContext !== null) ||
+      (entry.type === 'complete' && !!entry.completionSummary))
   const EXPANDED_ROW_TOP_OFFSET = 12
   const EXPANDED_ROW_SCROLL_DELAY_MS = 340
 
@@ -1634,9 +2349,14 @@ function TimelineEventRow({
                 ref={cardRef}
                 className={`min-w-0 flex-1 rounded-2xl border p-4 ${rowCardClass}`}
               >
-                <p className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
-                  {entry.title}
-                </p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                    {entry.title}
+                  </p>
+                  {decisionConfidenceLabel ? (
+                    <DemoBadge color="gray">{decisionConfidenceLabel}</DemoBadge>
+                  ) : null}
+                </div>
                 <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
                   {entry.description}
                 </p>
@@ -1686,9 +2406,14 @@ function TimelineEventRow({
                 className="group flex w-full items-start justify-between gap-3 px-4 py-4 text-left"
               >
                 <div className="min-w-0 flex-1">
-                  <p className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
-                    {entry.title}
-                  </p>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                      {entry.title}
+                    </p>
+                    {decisionConfidenceLabel ? (
+                      <DemoBadge color="gray">{decisionConfidenceLabel}</DemoBadge>
+                    ) : null}
+                  </div>
                   <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
                     {entry.description}
                   </p>
@@ -1792,9 +2517,19 @@ export function SelfTriagingDemo() {
     () => buildBoardRevealQueue(initialSnapshot.tasks),
   )
   const [activeScanTaskId, setActiveScanTaskId] = useState<string | null>(null)
+  const [activeTaskPhase, setActiveTaskPhase] = useState<{
+    taskId: string
+    phase: ActiveTaskPhase
+  } | null>(null)
+  const [recentlySignaledTaskIds, setRecentlySignaledTaskIds] = useState<
+    string[]
+  >([])
   const [recentlyTriagedTaskIds, setRecentlyTriagedTaskIds] = useState<
     string[]
   >([])
+  const [recentlyPassedTaskIds, setRecentlyPassedTaskIds] = useState<string[]>(
+    [],
+  )
   const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[]>([])
   const [recentTimelineEventIds, setRecentTimelineEventIds] = useState<
     string[]
@@ -1886,7 +2621,7 @@ export function SelfTriagingDemo() {
       }
 
       historyBody.scrollTo({
-        top: 0,
+        top: historyBody.scrollHeight,
         behavior: 'smooth',
       })
     })
@@ -1923,9 +2658,64 @@ export function SelfTriagingDemo() {
       })),
     [snapshot.tasks],
   )
+  const needsAttentionTasks = useMemo(
+    () =>
+      snapshot.tasks.filter((task) => task.attentionState === 'needs_attention'),
+    [snapshot.tasks],
+  )
+  const attentionReasonByTaskId = useMemo(() => {
+    const reasonByTaskId = new Map<string, string>()
+
+    for (const signal of snapshot.signals) {
+      const triage = effectiveTriage[signal.id]
+      const summary = triage?.reasoning ?? signal.summary
+
+      if (!reasonByTaskId.has(signal.taskId)) {
+        reasonByTaskId.set(signal.taskId, summary)
+      }
+
+      for (const relatedTaskId of signal.relatedTaskIds ?? []) {
+        if (!reasonByTaskId.has(relatedTaskId)) {
+          reasonByTaskId.set(relatedTaskId, signal.summary)
+        }
+      }
+    }
+
+    return reasonByTaskId
+  }, [effectiveTriage, snapshot.signals])
+  const signalKindByTaskId = useMemo(() => {
+    const kindByTaskId = new Map<string, DemoSignal['kind']>()
+
+    for (const signal of snapshot.signals) {
+      if (!kindByTaskId.has(signal.taskId)) {
+        kindByTaskId.set(signal.taskId, signal.kind)
+      }
+
+      for (const relatedTaskId of signal.relatedTaskIds ?? []) {
+        if (!kindByTaskId.has(relatedTaskId)) {
+          kindByTaskId.set(relatedTaskId, signal.kind)
+        }
+      }
+    }
+
+    return kindByTaskId
+  }, [snapshot.signals])
+  const aiReviewTaskIds = useMemo(() => {
+    const taskIds = new Set<string>()
+
+    for (const signalId of aiPendingSignalIds) {
+      const signal = snapshot.signals.find((item) => item.id === signalId)
+
+      if (signal) {
+        taskIds.add(signal.taskId)
+      }
+    }
+
+    return [...taskIds]
+  }, [aiPendingSignalIds, snapshot.signals])
   const orderedTimelineEvents = useMemo(
     () =>
-      [...timelineEvents].sort((left, right) => right.sequence - left.sequence),
+      [...timelineEvents].sort((left, right) => left.sequence - right.sequence),
     [timelineEvents],
   )
 
@@ -1969,6 +2759,28 @@ export function SelfTriagingDemo() {
 
   function clearNarrativeHeader() {
     setNarrativeHeader(null)
+  }
+
+  function resetRunState(options?: {
+    boardQueue?: BoardRevealQueue
+    keepBoardBooting?: boolean
+  }) {
+    setAiPendingSignalIds([])
+    setUsageSummary(emptyUsageSummary)
+    aiTriageCacheRef.current.clear()
+    usageSummaryRef.current = emptyUsageSummary
+    previousSnapshotRef.current = null
+    setActiveScanTaskId(null)
+    setActiveTaskPhase(null)
+    setVisibleBoardTaskIds([])
+    setBoardRevealQueue(options?.boardQueue ?? {})
+    setRecentlySignaledTaskIds([])
+    setRecentlyTriagedTaskIds([])
+    setRecentlyPassedTaskIds([])
+    setRecentlyChangedTaskIds([])
+    setIsBoardBooting(options?.keepBoardBooting ?? false)
+    clearTimeline()
+    clearNarrativeHeader()
   }
 
   function appendTimelineEvent(entry: TimelineEvent) {
@@ -2019,7 +2831,7 @@ export function SelfTriagingDemo() {
 
   function findLatestTimelineEventForTask(taskId: string) {
     return (
-      orderedTimelineEvents.find(
+      timelineEvents.find(
         (event) => event.taskId === taskId && event.type !== 'monitoring',
       ) ?? null
     )
@@ -2212,7 +3024,6 @@ export function SelfTriagingDemo() {
     setAiPendingSignalIds((current) => [
       ...new Set([...current, ...uncachedSignalIds]),
     ])
-
     try {
       const response = await fetch('/api/demo-triage', {
         method: 'POST',
@@ -2352,15 +3163,10 @@ export function SelfTriagingDemo() {
         ? buildPseudoSelectionTriage(nextSnapshot, nextSelectedSignalId)
         : {},
     )
-    setAiPendingSignalIds([])
-    setUsageSummary(emptyUsageSummary)
-    setActiveScanTaskId(null)
-    setIsBoardBooting(true)
-    setVisibleBoardTaskIds([])
-    setBoardRevealQueue(buildBoardRevealQueue(nextSnapshot.tasks))
-    setRecentlyTriagedTaskIds([])
-    clearTimeline()
-    clearNarrativeHeader()
+    resetRunState({
+      boardQueue: buildBoardRevealQueue(nextSnapshot.tasks),
+      keepBoardBooting: true,
+    })
     setSnapshot(nextSnapshot)
     setSelectedSignalId(nextSelectedSignalId)
     setTriagePassCount(1)
@@ -2383,15 +3189,10 @@ export function SelfTriagingDemo() {
         ? buildPseudoSelectionTriage(nextSnapshot, nextSelectedSignalId)
         : {},
     )
-    setAiPendingSignalIds([])
-    setUsageSummary(emptyUsageSummary)
-    setActiveScanTaskId(null)
-    setIsBoardBooting(true)
-    setVisibleBoardTaskIds([])
-    setBoardRevealQueue(buildBoardRevealQueue(nextSnapshot.tasks))
-    setRecentlyTriagedTaskIds([])
-    clearTimeline()
-    clearNarrativeHeader()
+    resetRunState({
+      boardQueue: buildBoardRevealQueue(nextSnapshot.tasks),
+      keepBoardBooting: true,
+    })
     setSnapshot(nextSnapshot)
     setSelectedSignalId(nextSelectedSignalId)
     setTriagePassCount(1)
@@ -2420,23 +3221,18 @@ export function SelfTriagingDemo() {
         ? buildPseudoSelectionTriage(runStartSnapshot, runStartSignalId)
         : {},
     )
-    setAiPendingSignalIds([])
-    setIsBoardBooting(false)
-    setVisibleBoardTaskIds([])
-    setBoardRevealQueue(buildBoardRevealQueue(runStartSnapshot.tasks))
-    setActiveScanTaskId(null)
-    setRecentlyTriagedTaskIds([])
-    setRecentlyChangedTaskIds([])
-    clearTimeline()
-    clearNarrativeHeader()
+    resetRunState({
+      boardQueue: buildBoardRevealQueue(runStartSnapshot.tasks),
+      keepBoardBooting: false,
+    })
     setNarrativeHeader(buildNarrativeHeader('monitoring'))
-    appendTimelineEvent(buildMonitoringNarrativeEntry())
     setIsTriagePassRunning(true)
     void (async () => {
       let workingTasks = runStartSnapshot.tasks.map((task) => ({ ...task }))
-      const revealedTaskIds = new Set<string>()
+      const signalMessageByTaskId = new Map<string, string>()
       const burstCount = randomBetween(INCIDENT_BURST_MIN, INCIDENT_BURST_MAX)
       let appliedIncidents = 0
+      const healthyTaskTitles: string[] = []
       const narrativeDecisions: Array<{
         decision: TaskPassDecision
         previousTask: DemoTask
@@ -2457,26 +3253,9 @@ export function SelfTriagingDemo() {
         if (randomIncidentResult.incidentCount > 0) {
           workingTasks = randomIncidentResult.tasks
           appliedIncidents += randomIncidentResult.incidentCount
-          setSnapshot((current) => ({
-            ...current,
-            tasks: workingTasks,
-          }))
           for (const incidentEvent of randomIncidentResult.incidentEvents) {
-            revealBoardTask(incidentEvent.taskId)
-            revealedTaskIds.add(incidentEvent.taskId)
+            signalMessageByTaskId.set(incidentEvent.taskId, incidentEvent.message)
             await wait(BOARD_REVEAL_BEFORE_SIGNAL_MS)
-
-            if (contextVersionRef.current !== version) {
-              return
-            }
-
-            setNarrativeHeader({
-              title: narrativeCopy.signal.title,
-              subtitle: incidentEvent.message,
-            })
-            appendTimelineEvent(
-              buildSignalNarrativeEntry(incidentEvent.message),
-            )
           }
         }
 
@@ -2487,29 +3266,19 @@ export function SelfTriagingDemo() {
         }
       }
 
-      const remainingRevealTaskIds = workingTasks
-        .map((task) => task.id)
-        .filter((taskId) => !revealedTaskIds.has(taskId))
-
-      for (const taskId of remainingRevealTaskIds) {
-        if (contextVersionRef.current !== version) {
-          return
-        }
-
-        revealBoardTask(taskId)
-        revealedTaskIds.add(taskId)
-        await wait(BOARD_REVEAL_BEFORE_EVALUATION_MS)
-      }
-
       setIncidentCount(appliedIncidents)
-      setNarrativeHeader(buildNarrativeHeader('evaluating'))
-      appendTimelineEvent(buildEvaluatingNarrativeEntry())
+      if (appliedIncidents > 0) {
+        appendTimelineEvent(buildMonitoringNarrativeEntry())
+      }
+      setNarrativeHeader(buildNarrativeHeader('monitoring'))
       await wait(EVALUATION_DELAY_MS)
+      const evaluationState = evaluateTasks(workingTasks, passLabel)
+      const nextBoardRevealQueue = buildBoardRevealQueue(workingTasks)
 
-      const orderedTaskIds = taskStatusOrder.flatMap((status) =>
-        workingTasks
-          .filter((task) => task.status === status)
-          .map((task) => task.id),
+      setBoardRevealQueue(nextBoardRevealQueue)
+
+      const orderedTaskIds = taskStatusOrder.flatMap(
+        (status) => nextBoardRevealQueue[status] ?? [],
       )
 
       for (const taskId of orderedTaskIds) {
@@ -2517,7 +3286,19 @@ export function SelfTriagingDemo() {
           return
         }
 
+        revealBoardTask(taskId)
+        await wait(BOARD_REVEAL_BEFORE_EVALUATION_MS)
+
+        if (contextVersionRef.current !== version) {
+          return
+        }
+
         setActiveScanTaskId(taskId)
+        setActiveTaskPhase({ taskId, phase: 'scan' })
+        setNarrativeHeader({
+          title: 'Monitors active...',
+          subtitle: `Scanning ${workingTasks.find((task) => task.id === taskId)?.title ?? 'task'} for drift and alert conditions.`,
+        })
         await wait(SCAN_DELAY_MS)
 
         if (contextVersionRef.current !== version) {
@@ -2530,12 +3311,196 @@ export function SelfTriagingDemo() {
           continue
         }
 
+        const signalMessage = signalMessageByTaskId.get(taskId)
+        const signalForTask =
+          evaluationState.signals.find(
+            (signal) =>
+              signal.taskId === currentTask.id ||
+              (signal.relatedTaskIds ?? []).includes(currentTask.id),
+          ) ?? null
+
+        if (signalMessage) {
+          setActiveTaskPhase({ taskId, phase: 'signal' })
+          setRecentlySignaledTaskIds((current) => [...new Set([taskId, ...current])])
+          window.setTimeout(() => {
+            setRecentlySignaledTaskIds((current) =>
+              current.filter((currentTaskId) => currentTaskId !== taskId),
+            )
+          }, 1800)
+          setSnapshot((current) => ({
+            ...current,
+            tasks: current.tasks.map((task) =>
+              task.id === currentTask.id ? currentTask : task,
+            ),
+          }))
+          const signalNarrative = buildSignalNarrativeContent(signalMessage)
+          setNarrativeHeader({
+            title: signalNarrative.title,
+            subtitle: signalNarrative.description,
+          })
+          appendTimelineEvent(buildSignalNarrativeEntry(signalMessage))
+
+          await wait(Math.max(350, Math.floor(DECISION_STAGGER_MS * 0.65)))
+
+          if (contextVersionRef.current !== version) {
+            return
+          }
+
+          if (TRIAGE_MODE === 'ai') {
+            if (signalForTask) {
+              setActiveTaskPhase({ taskId, phase: 'ai_review' })
+              setNarrativeHeader({
+                title: 'AI reviewing alert',
+                subtitle: `${signalForTask.title} is being assessed against recent actions, current task context, and safe remediation paths.`,
+              })
+
+              await wait(Math.max(350, Math.floor(DECISION_STAGGER_MS * 0.55)))
+
+              if (contextVersionRef.current !== version) {
+                return
+              }
+            }
+          }
+        }
+
         const decision = evaluateTaskPassDecision(currentTask)
         if (decision.tone !== 'stable') {
+          const signalId = selectFirstSignalForTask(
+            {
+              ...runStartSnapshot,
+              tasks: workingTasks,
+              signals: evaluationState.signals,
+              triage: evaluationState.triage,
+              actions: runStartSnapshot.actions,
+            },
+            decision.nextTask.id,
+          )
+          const triageForDecision = signalId
+            ? evaluationState.triage[signalId]
+            : null
+
           narrativeDecisions.push({
             decision,
             previousTask: currentTask,
           })
+
+          setNarrativeHeader({
+            title: buildDecisionNarrativeLabel(decision),
+            subtitle: triageForDecision?.reasoning ?? decision.reasoning,
+          })
+          setActiveTaskPhase({ taskId, phase: 'decision' })
+          appendTimelineEvent(
+            buildTimelineEvent(
+              'decision',
+              buildDecisionNarrativeLabel(decision),
+              triageForDecision?.reasoning ?? decision.reasoning,
+              {
+                taskId: decision.nextTask.id,
+                signalId,
+                decisionTone: decision.tone,
+                decision,
+                eventDecision: buildDecisionEventSummary(
+                  decision,
+                  triageForDecision,
+                  signalForTask,
+                ),
+              },
+            ),
+          )
+
+          await wait(DECISION_STAGGER_MS)
+
+          if (contextVersionRef.current !== version) {
+            return
+          }
+
+          const nextWorkingTasks = workingTasks.map((task) =>
+            task.id === decision.nextTask.id ? decision.nextTask : task,
+          )
+          const nextDerivedTimelineState = evaluateTasks(nextWorkingTasks, passLabel)
+          const nextSignalId = selectFirstSignalForTask(
+            {
+              ...runStartSnapshot,
+              tasks: nextWorkingTasks,
+              signals: nextDerivedTimelineState.signals,
+              triage: nextDerivedTimelineState.triage,
+              actions: runStartSnapshot.actions,
+            },
+            decision.nextTask.id,
+          )
+          const triageForEvent = nextSignalId
+            ? nextDerivedTimelineState.triage[nextSignalId]
+            : null
+          const actionType = deriveTimelineActionType(decision, currentTask)
+
+          workingTasks = nextWorkingTasks
+          setSnapshot((current) => ({
+            ...current,
+            tasks: workingTasks,
+          }))
+          setRecentlyTriagedTaskIds((current) => [
+            ...new Set([decision.nextTask.id, ...current]),
+          ])
+          window.setTimeout(() => {
+            setRecentlyTriagedTaskIds((current) =>
+              current.filter(
+                (currentTaskId) => currentTaskId !== decision.nextTask.id,
+              ),
+            )
+          }, 1400)
+
+          setNarrativeHeader({
+            title: buildActionNarrativeLabel(decision, currentTask),
+            subtitle: buildActionNarrativeDetail(decision, currentTask),
+          })
+          setActiveTaskPhase({ taskId, phase: 'action_issue' })
+          appendTimelineEvent(
+            buildTimelineEvent(
+              'action',
+              buildActionNarrativeLabel(decision, currentTask),
+              buildActionNarrativeDetail(decision, currentTask),
+              {
+                taskId: decision.nextTask.id,
+                signalId: nextSignalId,
+                decisionTone: decision.tone,
+                decision,
+                previousTask: currentTask,
+                before: captureTaskStateSnapshot(currentTask),
+                after: projectTaskStateSnapshotForAction(currentTask, actionType),
+                eventTriage: triageForEvent
+                  ? {
+                      suggestedRemediation: triageForEvent.suggestedRemediation,
+                      guardrailStatus: triageForEvent.guardrailStatus,
+                      guardrailReason: triageForEvent.guardrailReason,
+                    }
+                  : undefined,
+                eventAction: {
+                  type: actionType,
+                  message: buildActionNarrativeDetail(decision, currentTask),
+                  timestamp: 'During this sweep',
+                },
+              },
+            ),
+          )
+
+          await wait(ACTION_STAGGER_MS)
+        } else {
+          healthyTaskTitles.push(currentTask.title)
+          setRecentlyPassedTaskIds((current) => [...new Set([taskId, ...current])])
+          window.setTimeout(() => {
+            setRecentlyPassedTaskIds((current) =>
+              current.filter((currentTaskId) => currentTaskId !== taskId),
+            )
+          }, 900)
+          setNarrativeHeader({
+            title: 'Monitors active...',
+            subtitle: `${currentTask.title} cleared this monitor sweep.`,
+          })
+          if (ENABLE_FULL_AUDIT_MODE) {
+            appendTimelineEvent(buildPassedScanNarrative(currentTask))
+          }
+          setActiveTaskPhase({ taskId, phase: 'action_pass' })
+          await wait(Math.max(250, Math.floor(SCAN_DELAY_MS * 0.35)))
         }
       }
 
@@ -2544,121 +3509,7 @@ export function SelfTriagingDemo() {
       }
 
       setActiveScanTaskId(null)
-
-      const projectedTasks = narrativeDecisions.reduce(
-        (currentTasks, { decision }) =>
-          currentTasks.map((task) =>
-            task.id === decision.nextTask.id ? decision.nextTask : task,
-          ),
-        workingTasks,
-      )
-      const derivedTimelineState = evaluateTasks(projectedTasks, passLabel)
-
-      for (const { decision } of narrativeDecisions) {
-        if (contextVersionRef.current !== version) {
-          return
-        }
-
-        appendTimelineEvent(
-          buildTimelineEvent(
-            'decision',
-            buildDecisionNarrativeLabel(decision),
-            decision.reasoning,
-            {
-              taskId: decision.nextTask.id,
-              signalId: selectFirstSignalForTask(
-                {
-                  ...runStartSnapshot,
-                  tasks: projectedTasks,
-                  signals: derivedTimelineState.signals,
-                  triage: derivedTimelineState.triage,
-                  actions: runStartSnapshot.actions,
-                },
-                decision.nextTask.id,
-              ),
-              decisionTone: decision.tone,
-              decision,
-            },
-          ),
-        )
-
-        await wait(DECISION_STAGGER_MS)
-      }
-
-      await wait(ACTION_PHASE_DELAY_MS)
-
-      for (const { decision, previousTask } of narrativeDecisions) {
-        if (contextVersionRef.current !== version) {
-          return
-        }
-
-        const signalId = selectFirstSignalForTask(
-                {
-                  ...runStartSnapshot,
-                  tasks: projectedTasks,
-                  signals: derivedTimelineState.signals,
-                  triage: derivedTimelineState.triage,
-                  actions: runStartSnapshot.actions,
-          },
-          decision.nextTask.id,
-        )
-        const triageForEvent = signalId
-          ? derivedTimelineState.triage[signalId]
-          : null
-        const actionType = deriveTimelineActionType(decision, previousTask)
-
-        workingTasks = workingTasks.map((task) =>
-          task.id === decision.nextTask.id ? decision.nextTask : task,
-        )
-        setSnapshot((current) => ({
-          ...current,
-          tasks: workingTasks,
-        }))
-        setRecentlyTriagedTaskIds((current) => [
-          ...new Set([decision.nextTask.id, ...current]),
-        ])
-        window.setTimeout(() => {
-          setRecentlyTriagedTaskIds((current) =>
-            current.filter(
-              (currentTaskId) => currentTaskId !== decision.nextTask.id,
-            ),
-          )
-        }, 1400)
-
-        appendTimelineEvent(
-          buildTimelineEvent(
-            'action',
-            buildActionNarrativeLabel(decision, previousTask),
-            buildActionNarrativeDetail(decision, previousTask),
-            {
-              taskId: decision.nextTask.id,
-              signalId,
-              decisionTone: decision.tone,
-              decision,
-              previousTask,
-              before: captureTaskStateSnapshot(previousTask),
-              after: projectTaskStateSnapshotForAction(
-                previousTask,
-                actionType,
-              ),
-              eventTriage: triageForEvent
-                ? {
-                    suggestedRemediation: triageForEvent.suggestedRemediation,
-                    guardrailStatus: triageForEvent.guardrailStatus,
-                    guardrailReason: triageForEvent.guardrailReason,
-                  }
-                : undefined,
-              eventAction: {
-                type: actionType,
-                message: buildActionNarrativeDetail(decision, previousTask),
-                timestamp: 'During this pass',
-              },
-            },
-          ),
-        )
-
-        await wait(ACTION_STAGGER_MS)
-      }
+      setActiveTaskPhase(null)
 
       if (contextVersionRef.current !== version) {
         return
@@ -2679,10 +3530,11 @@ export function SelfTriagingDemo() {
       setTriagePassCount(nextPassCount)
       setActiveScanTaskId(null)
       appendTimelineEvent(
-        buildTimelineEvent(
-          'complete',
-          narrativeCopy.complete.headerTitle,
-          summarizeCompletion(narrativeDecisions.map((item) => item.decision)),
+        buildCompletionNarrativeEntry(
+          buildCompletionSummary(
+            narrativeDecisions.map((item) => item.decision),
+            healthyTaskTitles,
+          ),
         ),
       )
       clearNarrativeHeader()
@@ -2724,57 +3576,60 @@ export function SelfTriagingDemo() {
                   <h1 className="text-3xl font-semibold tracking-tight text-zinc-900 sm:text-4xl dark:text-zinc-100">
                     Self-triaging todo system
                   </h1>
-                  {TRIAGE_MODE === 'pseudo' ? (
-                    <div
-                      className="relative"
-                      onMouseEnter={() => setIsAiInfoOpen(true)}
-                      onMouseLeave={() => setIsAiInfoOpen(false)}
+                  <div
+                    className="relative"
+                    onMouseEnter={() => setIsAiInfoOpen(true)}
+                    onMouseLeave={() => setIsAiInfoOpen(false)}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => setIsAiInfoOpen((current) => !current)}
+                      onFocus={() => setIsAiInfoOpen(true)}
+                      onBlur={() => setIsAiInfoOpen(false)}
+                      className={`${basePillClass} cursor-pointer border-zinc-300/65 bg-zinc-700 text-zinc-300 transition hover:border-zinc-200/75 hover:bg-zinc-600 hover:text-zinc-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400/60 dark:border-zinc-600/55 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:border-zinc-500/70 dark:hover:bg-zinc-700 dark:hover:text-zinc-200`}
                     >
-                      <button
-                        type="button"
-                        onClick={() => setIsAiInfoOpen((current) => !current)}
-                        onFocus={() => setIsAiInfoOpen(true)}
-                        onBlur={() => setIsAiInfoOpen(false)}
-                        className={`${basePillClass} cursor-pointer border-zinc-300/65 bg-zinc-700 text-zinc-300 transition hover:border-zinc-200/75 hover:bg-zinc-600 hover:text-zinc-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400/60 dark:border-zinc-600/55 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:border-zinc-500/70 dark:hover:bg-zinc-700 dark:hover:text-zinc-200`}
-                      >
-                        <span>AI</span>
-                        <span className="flex h-4 w-4 items-center justify-center rounded-full border border-white/22 text-[10px] leading-none text-white">
-                          i
-                        </span>
-                      </button>
-                      <Transition
-                        as={Fragment}
-                        show={isAiInfoOpen}
-                        enter="transition ease-out duration-200"
-                        enterFrom="opacity-0 translate-y-1"
-                        enterTo="opacity-100 translate-y-0"
-                        leave="transition ease-in duration-150"
-                        leaveFrom="opacity-100 translate-y-0"
-                        leaveTo="opacity-0 translate-y-1"
-                      >
-                        <div className="absolute top-full left-0 z-20 mt-3 w-80 overflow-hidden rounded-2xl border border-zinc-200/65 bg-white/95 shadow-2xl ring-1 ring-zinc-900/4 backdrop-blur dark:border-zinc-700/30 dark:bg-zinc-950/95 dark:ring-white/8">
-                          <div className="space-y-2 rounded-2xl bg-zinc-100/80 p-4 dark:bg-zinc-900/60">
-                            <p className="text-xs font-medium tracking-[0.16em] text-zinc-500 uppercase dark:text-zinc-400">
-                              Demo mode
-                            </p>
-                            <p className="text-xs leading-5 text-zinc-600 dark:text-zinc-400">
-                              API calls are paused. Signals, guardrails, and
-                              action logging still run locally, and identical
-                              triage contexts are cached for this session.
-                            </p>
-                            <div className="flex flex-wrap gap-2">
-                              <DemoBadge color="blue">
-                                Cache hits {usageSummary.cacheHits}
+                      <span>{TRIAGE_MODE === 'ai' ? 'AI' : 'Local'}</span>
+                      <span className="flex h-4 w-4 items-center justify-center rounded-full border border-white/22 text-[10px] leading-none text-white">
+                        i
+                      </span>
+                    </button>
+                    <Transition
+                      as={Fragment}
+                      show={isAiInfoOpen}
+                      enter="transition ease-out duration-200"
+                      enterFrom="opacity-0 translate-y-1"
+                      enterTo="opacity-100 translate-y-0"
+                      leave="transition ease-in duration-150"
+                      leaveFrom="opacity-100 translate-y-0"
+                      leaveTo="opacity-0 translate-y-1"
+                    >
+                      <div className="absolute top-full left-0 z-20 mt-3 w-80 overflow-hidden rounded-2xl border border-zinc-200/65 bg-white/95 shadow-2xl ring-1 ring-zinc-900/4 backdrop-blur dark:border-zinc-700/30 dark:bg-zinc-950/95 dark:ring-white/8">
+                        <div className="space-y-2 rounded-2xl bg-zinc-100/80 p-4 dark:bg-zinc-900/60">
+                          <p className="text-xs font-medium tracking-[0.16em] text-zinc-500 uppercase dark:text-zinc-400">
+                            {TRIAGE_MODE === 'ai' ? 'AI mode' : 'Local mode'}
+                          </p>
+                          <p className="text-xs leading-5 text-zinc-600 dark:text-zinc-400">
+                            {TRIAGE_MODE === 'ai'
+                              ? 'Live model calls are enabled. Monitor evaluation, guardrails, and action logging run with model-assisted triage.'
+                              : 'API calls are paused. Monitor evaluation, guardrails, and action logging still run locally, and identical alert contexts are cached for this session.'}
+                          </p>
+                          <div className="flex flex-wrap gap-2">
+                            <DemoBadge color="blue">
+                              Cache hits {usageSummary.cacheHits}
+                            </DemoBadge>
+                            <DemoBadge color="yellow">
+                              Fallbacks {usageSummary.fallbacks}
+                            </DemoBadge>
+                            {TRIAGE_MODE === 'ai' ? (
+                              <DemoBadge color="softTeal">
+                                AI calls {usageSummary.aiCalls}
                               </DemoBadge>
-                              <DemoBadge color="yellow">
-                                Fallbacks {usageSummary.fallbacks}
-                              </DemoBadge>
-                            </div>
+                            ) : null}
                           </div>
                         </div>
-                      </Transition>
-                    </div>
-                  ) : null}
+                      </div>
+                    </Transition>
+                  </div>
                 </div>
               </div>
               <div className="flex items-center gap-3 self-start sm:pt-1">
@@ -2789,13 +3644,13 @@ export function SelfTriagingDemo() {
                   disabled={isTriagePassRunning}
                   title={
                     isTriagePassRunning || isAnyTriagePending
-                      ? 'Running incident simulation'
-                      : 'Run incident simulation'
+                      ? 'Running monitor sweep'
+                      : 'Run monitor sweep'
                   }
                   aria-label={
                     isTriagePassRunning || isAnyTriagePending
-                      ? 'Running incident simulation'
-                      : 'Run incident simulation'
+                      ? 'Running monitor sweep'
+                      : 'Run monitor sweep'
                   }
                   className="inline-flex cursor-pointer items-center justify-center rounded-xl border border-zinc-200/65 bg-zinc-50/80 px-3 py-2 text-sm font-semibold text-zinc-700 shadow-sm ring-1 ring-zinc-900/4 transition hover:border-zinc-300/75 hover:bg-zinc-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400/60 disabled:cursor-default disabled:opacity-55 dark:border-zinc-700/30 dark:bg-zinc-900/50 dark:text-zinc-200 dark:ring-white/8 dark:hover:border-zinc-600/60 dark:hover:bg-zinc-800/80"
                 >
@@ -2811,11 +3666,11 @@ export function SelfTriagingDemo() {
             </div>
             <div className="max-w-3xl text-base leading-7 text-zinc-600 dark:text-zinc-400">
               <p>
-                A local deterministic demo that derives signals, triage
-                decisions, and action log entries from task state, then hands
-                triage judgment
+                A local deterministic demo that turns monitor findings into
+                investigation steps, triage decisions, and action history, then
+                hands final judgment
                 {TRIAGE_MODE === 'pseudo'
-                  ? ' to a local pseudo-AI layer so the UI can be reviewed without model calls.'
+                  ? ' to a local pseudo-AI layer so the workflow can be reviewed without model calls.'
                   : ' to a real model with deterministic guardrails.'}
               </p>
             </div>
@@ -2825,105 +3680,197 @@ export function SelfTriagingDemo() {
         <div className="space-y-6">
           <Panel
             title="Task board"
-            description="Tasks are the source of truth. Expectations are checked directly against their current state."
+            description="Tasks are the monitored surface. Each card is scanned for drift, regression, and alert conditions."
             emphasis="primary"
           >
-            <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-4">
-              {groupedTasks.map(({ status, tasks }) => {
-                const visibleTaskCount = tasks.filter((task) =>
-                  visibleBoardTaskIds.includes(task.id),
-                ).length
-                const displayTaskCount = isTriagePassRunning
-                  ? visibleTaskCount
-                  : tasks.length
-
-                return (
-                  <div
-                    key={status}
-                    className={`rounded-2xl border p-4 ${statusPanelClasses[status]}`}
-                  >
-                    <div className="mb-4 flex items-center justify-between gap-3">
-                      <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
-                        {statusLabels[status]}
-                      </h2>
-                      <DemoBadge color={statusBadgeColor[status]}>
-                        {isBoardBooting ? 0 : displayTaskCount}
-                      </DemoBadge>
-                    </div>
-                  <div className="space-y-3">
-                    {(boardRevealQueue[status] ?? []).map((queuedTaskId) => (
-                      <TaskCardSkeleton
-                        key={`${status}-skeleton-${queuedTaskId}`}
-                      />
-                    ))}
-                    {tasks.map((task) => {
-                      const shouldShowTask =
+            <div className="space-y-4">
+              <div className="grid gap-4 md:grid-cols-3">
+                {groupedTasks.map(({ status, tasks }) => {
+                  const visibleTaskCount = tasks.filter((task) =>
+                    visibleBoardTaskIds.includes(task.id),
+                  ).length
+                  const displayTaskCount = isTriagePassRunning
+                    ? visibleTaskCount
+                    : tasks.length
+                  const orderedVisibleTasks = tasks
+                    .filter(
+                      (task) =>
                         !isBoardBooting &&
                         (!isTriagePassRunning ||
-                          visibleBoardTaskIds.includes(task.id))
+                          visibleBoardTaskIds.includes(task.id)),
+                    )
+                    .sort(
+                      (leftTask, rightTask) =>
+                        visibleBoardTaskIds.indexOf(leftTask.id) -
+                        visibleBoardTaskIds.indexOf(rightTask.id),
+                    )
+
+                  return (
+                    <div
+                      key={status}
+                      className={`rounded-2xl border p-4 ${statusPanelClasses[status]}`}
+                    >
+                      <div className="mb-4 flex items-center justify-between gap-3">
+                        <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                          {statusLabels[status]}
+                        </h2>
+                        <DemoBadge color={statusBadgeColor[status]}>
+                          {isBoardBooting ? 0 : displayTaskCount}
+                        </DemoBadge>
+                      </div>
+                      <div className="space-y-3">
+                        {orderedVisibleTasks.map((task) => {
+                            const matchingTimelineEvent =
+                              findLatestTimelineEventForTask(task.id)
+
+                            return (
+                              <Transition
+                                key={task.id}
+                                as={Fragment}
+                                show={true}
+                                appear
+                                enter="transform transition duration-1000 ease-out"
+                                enterFrom="-translate-x-6 opacity-0"
+                                enterTo="translate-x-0 opacity-100"
+                                leave="transition duration-150 ease-in"
+                                leaveFrom="opacity-100"
+                                leaveTo="opacity-0"
+                              >
+                                <div>
+                                  <TaskCard
+                                    task={task}
+                                    attentionReason={
+                                      attentionReasonByTaskId.get(task.id) ?? null
+                                    }
+                                    signalKind={signalKindByTaskId.get(task.id) ?? null}
+                                    isFocused={activeTaskId === task.id}
+                                    focusTone={activeTaskTone}
+                                    hoverTone={getTimelineEventFocusTone(
+                                      matchingTimelineEvent,
+                                    )}
+                                    onClick={
+                                      matchingTimelineEvent
+                                        ? () => {
+                                            const pulseToken = Date.now()
+                                            setSelectedTaskId(task.id)
+                                            const nextSignal = selectSignalForTask(
+                                              task.id,
+                                            )
+                                            setSelectedSignalId(nextSignal?.id ?? '')
+                                            setSelectedTimelineEventId(
+                                              matchingTimelineEvent.id,
+                                            )
+                                            setPulsedTimelineEvent({
+                                              id: matchingTimelineEvent.id,
+                                              token: pulseToken,
+                                            })
+                                            setScrollToTimelineEventId(
+                                              matchingTimelineEvent.id,
+                                            )
+                                            setIsHistoryOpen(true)
+                                          }
+                                        : undefined
+                                    }
+                                    isActiveScan={activeScanTaskId === task.id}
+                                    activePhase={
+                                      activeTaskPhase?.taskId === task.id
+                                        ? activeTaskPhase.phase
+                                        : null
+                                    }
+                                    isAiReviewing={aiReviewTaskIds.includes(
+                                      task.id,
+                                    )}
+                                    isRecentlySignaled={recentlySignaledTaskIds.includes(
+                                      task.id,
+                                    )}
+                                    isRecentlyPassed={recentlyPassedTaskIds.includes(
+                                      task.id,
+                                    )}
+                                    isRecentlyTriaged={recentlyTriagedTaskIds.includes(
+                                      task.id,
+                                    )}
+                                    isRecentlyChanged={recentlyChangedTaskIds.includes(
+                                      task.id,
+                                    )}
+                                  />
+                                </div>
+                              </Transition>
+                            )
+                          })}
+                        {(boardRevealQueue[status] ?? []).map((queuedTaskId) => (
+                          <TaskCardSkeleton
+                            key={`${status}-skeleton-${queuedTaskId}`}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+
+              <div className="rounded-2xl border border-red-200/65 bg-red-50/70 p-4 dark:border-red-500/20 dark:bg-red-500/10">
+                <div className="mb-4 flex items-center justify-between gap-3">
+                  <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                    Needs attention
+                  </h2>
+                  <DemoBadge color="red">
+                    {isBoardBooting ? 0 : needsAttentionTasks.length}
+                  </DemoBadge>
+                </div>
+                <div className="space-y-3">
+                  {needsAttentionTasks.length > 0 ? (
+                    needsAttentionTasks.map((task) => {
                       const matchingTimelineEvent =
                         findLatestTimelineEventForTask(task.id)
+                      const reason =
+                        attentionReasonByTaskId.get(task.id) ??
+                        'Flagged for review by deterministic triage rules.'
 
                       return (
-                        <Transition
-                          key={task.id}
-                          as={Fragment}
-                          show={shouldShowTask}
-                          appear
-                          enter="transform transition duration-1000 ease-out"
-                          enterFrom="-translate-x-6 opacity-0"
-                          enterTo="translate-x-0 opacity-100"
-                          leave="transition duration-150 ease-in"
-                          leaveFrom="opacity-100"
-                          leaveTo="opacity-0"
+                        <button
+                          key={`attention-${task.id}`}
+                          type="button"
+                          title={reason}
+                          onClick={() => {
+                            const pulseToken = Date.now()
+                            setSelectedTaskId(task.id)
+                            const nextSignal = selectSignalForTask(task.id)
+                            setSelectedSignalId(nextSignal?.id ?? '')
+                            if (matchingTimelineEvent) {
+                              setSelectedTimelineEventId(matchingTimelineEvent.id)
+                              setPulsedTimelineEvent({
+                                id: matchingTimelineEvent.id,
+                                token: pulseToken,
+                              })
+                              setScrollToTimelineEventId(
+                                matchingTimelineEvent.id,
+                              )
+                            }
+                            setIsHistoryOpen(true)
+                          }}
+                          className="w-full rounded-2xl border border-red-200/70 bg-white/95 p-3 text-left shadow-sm transition hover:border-red-300/80 hover:shadow-[0_0_0_1px_rgba(248,113,113,0.12),0_12px_28px_rgba(239,68,68,0.14)] dark:border-red-500/20 dark:bg-zinc-950/85 dark:hover:border-red-500/35"
                         >
-                          <div>
-                            <TaskCard
-                              task={task}
-                              isFocused={activeTaskId === task.id}
-                              focusTone={activeTaskTone}
-                              hoverTone={getTimelineEventFocusTone(
-                                matchingTimelineEvent,
-                              )}
-                              onClick={
-                                matchingTimelineEvent
-                                  ? () => {
-                                      const pulseToken = Date.now()
-                                      setSelectedTaskId(task.id)
-                                      const nextSignal = selectSignalForTask(
-                                        task.id,
-                                      )
-                                      setSelectedSignalId(nextSignal?.id ?? '')
-                                      setSelectedTimelineEventId(
-                                        matchingTimelineEvent.id,
-                                      )
-                                      setPulsedTimelineEvent({
-                                        id: matchingTimelineEvent.id,
-                                        token: pulseToken,
-                                      })
-                                      setScrollToTimelineEventId(
-                                        matchingTimelineEvent.id,
-                                      )
-                                      setIsHistoryOpen(true)
-                                    }
-                                  : undefined
-                              }
-                              isActiveScan={activeScanTaskId === task.id}
-                              isRecentlyTriaged={recentlyTriagedTaskIds.includes(
-                                task.id,
-                              )}
-                              isRecentlyChanged={recentlyChangedTaskIds.includes(
-                                task.id,
-                              )}
-                            />
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                              {task.title}
+                            </p>
+                            <DemoBadge color={statusBadgeColor[task.status]}>
+                              {statusLabels[task.status]}
+                            </DemoBadge>
                           </div>
-                        </Transition>
+                          <p className="mt-2 text-xs leading-5 text-zinc-600 dark:text-zinc-300">
+                            {reason}
+                          </p>
+                        </button>
                       )
-                    })}
-                  </div>
-                  </div>
-                )
-              })}
+                    })
+                  ) : (
+                    <p className="text-sm text-zinc-600 dark:text-zinc-400">
+                      No escalated items right now.
+                    </p>
+                  )}
+                </div>
+              </div>
             </div>
           </Panel>
         </div>
@@ -2939,7 +3886,7 @@ export function SelfTriagingDemo() {
         leaveFrom="translate-x-0"
         leaveTo="translate-x-full"
       >
-        <div className="pointer-events-none fixed inset-y-0 right-0 z-40 flex max-w-full pl-10 sm:pl-16">
+        <div className="pointer-events-none fixed inset-y-0 right-0 z-[60] flex max-w-full pl-10 sm:pl-16">
           <div className="pointer-events-auto w-screen max-w-md">
             <div className="relative flex h-full flex-col overflow-y-auto bg-white shadow-2xl dark:bg-zinc-950">
               <div className="border-b border-zinc-200/65 bg-zinc-100/90 px-4 py-6 shadow-inner sm:px-6 dark:border-zinc-800/55 dark:bg-zinc-900/90">
@@ -2960,16 +3907,6 @@ export function SelfTriagingDemo() {
                   <div className="ml-3 flex h-7 items-center">
                     <button
                       type="button"
-                      onPointerDown={(event) => {
-                        event.preventDefault()
-                        event.stopPropagation()
-                        setIsHistoryOpen(false)
-                      }}
-                      onMouseDown={(event) => {
-                        event.preventDefault()
-                        event.stopPropagation()
-                        setIsHistoryOpen(false)
-                      }}
                       onClick={(event) => {
                         event.preventDefault()
                         event.stopPropagation()
@@ -2990,12 +3927,6 @@ export function SelfTriagingDemo() {
                 {timelineEvents.length > 0 || isTriagePassRunning ? (
                   <div className="flow-root">
                     <ul role="list" className="-mb-5">
-                      {isTriagePassRunning ? (
-                        <TimelineLoadingRow
-                          title={narrativeHeader?.title}
-                          subtitle={narrativeHeader?.subtitle}
-                        />
-                      ) : null}
                       {orderedTimelineEvents.map((entry, index, entries) => {
                         const insightContext = entry.taskId
                           ? buildTaskInsightContext({
@@ -3044,6 +3975,12 @@ export function SelfTriagingDemo() {
                           />
                         )
                       })}
+                      {isTriagePassRunning ? (
+                        <TimelineLoadingRow
+                          title={narrativeHeader?.title}
+                          subtitle={narrativeHeader?.subtitle}
+                        />
+                      ) : null}
                     </ul>
                   </div>
                 ) : !isTriagePassRunning ? (
@@ -3100,6 +4037,72 @@ export function SelfTriagingDemo() {
         .demo-flicker-ring {
           animation: demoFlickerRing 1.15s ease-out;
         }
+
+        @keyframes demoAlertRing {
+          0% {
+            box-shadow:
+              0 0 0 0 rgba(248, 113, 113, 0.22),
+              0 0 0 0 rgba(248, 113, 113, 0);
+          }
+          45% {
+            box-shadow:
+              0 0 0 1px rgba(248, 113, 113, 0.55),
+              0 0 18px 2px rgba(248, 113, 113, 0.18);
+          }
+          100% {
+            box-shadow:
+              0 0 0 1px rgba(248, 113, 113, 0),
+              0 0 0 0 rgba(248, 113, 113, 0);
+          }
+        }
+
+        .demo-alert-ring {
+          animation: demoAlertRing 0.9s ease-out;
+        }
+
+        @keyframes demoPassRing {
+          0% {
+            box-shadow:
+              0 0 0 0 rgba(74, 222, 128, 0.2),
+              0 0 0 0 rgba(74, 222, 128, 0);
+          }
+          45% {
+            box-shadow:
+              0 0 0 1px rgba(74, 222, 128, 0.52),
+              0 0 18px 2px rgba(74, 222, 128, 0.16);
+          }
+          100% {
+            box-shadow:
+              0 0 0 1px rgba(74, 222, 128, 0),
+              0 0 0 0 rgba(74, 222, 128, 0);
+          }
+        }
+
+        .demo-pass-ring {
+          animation: demoPassRing 0.8s ease-out;
+        }
+
+        @keyframes needsAttentionPulse {
+          0% {
+            box-shadow:
+              0 0 0 1px rgba(248, 113, 113, 0.26),
+              0 0 0 0 rgba(248, 113, 113, 0.16);
+          }
+          50% {
+            box-shadow:
+              0 0 0 1px rgba(248, 113, 113, 0.35),
+              0 0 16px 2px rgba(248, 113, 113, 0.2);
+          }
+          100% {
+            box-shadow:
+              0 0 0 1px rgba(248, 113, 113, 0.26),
+              0 0 0 0 rgba(248, 113, 113, 0.16);
+          }
+        }
+
+        .needs-attention-pulse {
+          animation: needsAttentionPulse 2.8s ease-in-out infinite;
+        }
       `}</style>
     </section>
   )
@@ -3143,24 +4146,60 @@ function Panel({
 
 function TaskCard({
   task,
+  attentionReason = null,
+  signalKind = null,
   isFocused = false,
   focusTone = 'neutral',
   hoverTone = null,
   onClick,
   isActiveScan = false,
+  activePhase = null,
+  isAiReviewing = false,
+  isRecentlySignaled = false,
+  isRecentlyPassed = false,
   isRecentlyTriaged = false,
   isRecentlyChanged = false,
 }: {
   task: DemoTask
+  attentionReason?: string | null
+  signalKind?: DemoSignal['kind'] | null
   isFocused?: boolean
   focusTone?: TaskFocusTone
   hoverTone?: TaskFocusTone | null
   onClick?: () => void
   isActiveScan?: boolean
+  activePhase?: ActiveTaskPhase | null
+  isAiReviewing?: boolean
+  isRecentlySignaled?: boolean
+  isRecentlyPassed?: boolean
   isRecentlyTriaged?: boolean
   isRecentlyChanged?: boolean
 }) {
   const isClickable = typeof onClick === 'function'
+  const needsAttentionPulseClass =
+    task.attentionState === 'needs_attention' ? 'needs-attention-pulse' : ''
+  const titleClass =
+    signalKind === 'duplicate_task'
+      ? 'text-purple-700 dark:text-purple-300'
+      : signalKind === 'fix_ready'
+        ? 'text-sky-700 dark:text-sky-300'
+      : 'text-zinc-900 dark:text-zinc-100'
+  const ownerBadgeStyles =
+    signalKind === 'missing_owner'
+      ? 'inline-flex items-center rounded-full border border-amber-300/60 bg-amber-50 px-2 text-xs text-amber-800 dark:border-amber-500/25 dark:bg-amber-500/10 dark:text-amber-300'
+      : undefined
+  const ageLabelClass =
+    signalKind === 'task_overdue'
+      ? 'text-red-600 dark:text-red-300'
+      : signalKind === 'stuck_in_progress'
+        ? 'text-amber-600 dark:text-amber-300'
+        : signalKind === 'noise_alert'
+            ? 'text-zinc-500 dark:text-zinc-300'
+          : signalKind === 'known_issue'
+            ? 'text-blue-600 dark:text-blue-300'
+            : signalKind === 'fix_ready'
+              ? 'text-sky-600 dark:text-sky-300'
+        : 'text-zinc-500 dark:text-zinc-400'
   const hoverClass =
     isClickable && !isFocused
       ? hoverTone === 'escalate'
@@ -3168,7 +4207,7 @@ function TaskCard({
         : hoverTone === 'monitor'
           ? 'hover:border-yellow-300/65 hover:ring-1 hover:ring-yellow-200/45 dark:hover:border-yellow-500/25 dark:hover:ring-yellow-500/12'
           : hoverTone === 'stable'
-            ? 'hover:border-green-300/65 hover:ring-1 hover:ring-green-200/45 dark:hover:border-green-500/25 dark:hover:ring-green-500/12'
+            ? 'hover:border-teal-300/65 hover:ring-1 hover:ring-teal-200/45 dark:hover:border-teal-500/25 dark:hover:ring-teal-500/12'
             : 'hover:border-zinc-300/75 hover:ring-1 hover:ring-zinc-300/45 dark:hover:border-zinc-500/45 dark:hover:ring-zinc-500/16'
       : ''
 
@@ -3177,36 +4216,85 @@ function TaskCard({
       type="button"
       onClick={onClick}
       disabled={!isClickable}
-      className={`rounded-2xl border bg-white px-4 py-5 shadow-sm transition duration-300 dark:bg-zinc-950/70 ${
+      title={task.attentionState === 'needs_attention' ? attentionReason ?? '' : undefined}
+      className={`w-full rounded-2xl border bg-white px-4 py-5 shadow-sm transition duration-300 dark:bg-zinc-950/70 ${
         isFocused
           ? focusTone === 'escalate'
             ? 'border-red-300/65 ring-1 ring-red-200/50 dark:border-red-500/25 dark:ring-red-500/12'
             : focusTone === 'monitor'
               ? 'border-yellow-300/65 ring-1 ring-yellow-200/50 dark:border-yellow-500/25 dark:ring-yellow-500/12'
               : focusTone === 'stable'
-                ? 'border-green-300/65 ring-1 ring-green-200/50 dark:border-green-500/25 dark:ring-green-500/12'
+                ? 'border-teal-300/65 ring-1 ring-teal-200/50 dark:border-teal-500/25 dark:ring-teal-500/12'
                 : 'border-zinc-300/75 ring-1 ring-zinc-300/50 dark:border-zinc-500/45 dark:ring-zinc-500/18'
-          : 'border-zinc-200/65 dark:border-zinc-700/25'
+          : task.attentionState === 'needs_attention'
+            ? 'border-red-200/70 ring-1 ring-red-200/40 dark:border-red-500/20 dark:ring-red-500/10'
+            : task.attentionState === 'watch'
+              ? 'border-yellow-200/70 ring-1 ring-yellow-200/40 dark:border-yellow-500/20 dark:ring-yellow-500/10'
+              : 'border-zinc-200/65 dark:border-zinc-700/25'
       } ${
         isActiveScan
-          ? 'scale-[1.02] ring-2 ring-blue-300/55 dark:ring-blue-400/32'
+          ? activePhase === 'signal' || activePhase === 'action_issue'
+            ? 'scale-[1.02] ring-2 ring-red-300/65 dark:ring-red-400/32'
+            : activePhase === 'ai_review'
+              ? 'scale-[1.02] ring-2 ring-teal-300/65 dark:ring-teal-400/32'
+            : activePhase === 'evaluating'
+            ? 'scale-[1.02] ring-2 ring-blue-300/65 dark:ring-blue-400/32'
+            : activePhase === 'decision'
+              ? 'scale-[1.02] ring-2 ring-indigo-300/65 dark:ring-indigo-400/32'
+              : activePhase === 'action_pass'
+                  ? 'scale-[1.02] ring-2 ring-green-300/65 dark:ring-green-400/32'
+                  : 'scale-[1.02] ring-2 ring-amber-300/65 dark:ring-amber-400/32'
+          : isRecentlySignaled || isRecentlyTriaged
+            ? 'ring-2 ring-red-300/55 dark:ring-red-400/28'
+          : isAiReviewing
+            ? 'ring-2 ring-teal-300/55 dark:ring-teal-400/28'
+          : isRecentlyPassed
+            ? 'ring-2 ring-green-300/55 dark:ring-green-400/28'
           : ''
-      } ${isRecentlyChanged || isRecentlyTriaged ? 'demo-flicker-ring' : ''} ${
+      } ${isRecentlyChanged ? 'demo-flicker-ring' : ''} ${
+        isRecentlySignaled || isRecentlyTriaged ? 'demo-alert-ring' : ''
+      } ${
+        isRecentlyPassed ? 'demo-pass-ring' : ''
+      } ${
         isClickable ? 'cursor-pointer' : 'cursor-default'
-      } ${hoverClass} text-left`}
+      } ${hoverClass} ${needsAttentionPulseClass} text-left`}
     >
       <div className="flex items-start justify-between gap-3">
-        <p className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+        <p className={`text-sm font-semibold ${titleClass}`}>
           {task.title}
         </p>
         <Badge color="gray">{task.priority}</Badge>
       </div>
+      {attentionReason ? (
+        <p className="mt-2 text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+          {attentionReason}
+        </p>
+      ) : null}
       <div className="mt-4 flex flex-wrap items-center gap-2.5">
-        <Badge color={task.owner ? 'blue' : 'yellow'}>
+        <Badge
+          color={task.owner ? 'blue' : 'yellow'}
+          customStyles={ownerBadgeStyles}
+        >
           {task.owner ?? 'Unassigned'}
         </Badge>
+        {task.attentionState === 'needs_attention' ? (
+          <Badge color="red">Needs attention</Badge>
+        ) : task.attentionState === 'watch' ? (
+          <Badge color="yellow">Watch</Badge>
+        ) : null}
         {isActiveScan ? <Badge color="blue">Scanning</Badge> : null}
-        <span className="text-[11px] font-medium tracking-wide text-zinc-500 uppercase dark:text-zinc-400">
+        {isAiReviewing && !isActiveScan ? (
+          <Badge color="softTeal">AI reviewing</Badge>
+        ) : null}
+        {isRecentlyPassed ? (
+          <span className="inline-flex items-center gap-1 rounded-full border border-green-300/60 bg-green-50 px-2 py-0.5 text-[11px] font-medium text-green-700 dark:border-green-500/25 dark:bg-green-500/10 dark:text-green-300">
+            <CheckCircleIcon className="h-4 w-4" />
+            Passed
+          </span>
+        ) : null}
+        <span
+          className={`text-[11px] font-medium tracking-wide uppercase ${ageLabelClass}`}
+        >
           {task.ageLabel}
         </span>
       </div>

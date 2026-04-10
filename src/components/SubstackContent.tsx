@@ -1,6 +1,7 @@
 'use client'
 
 import React, { Fragment, useEffect, useRef, useState } from 'react'
+import Image from 'next/image'
 import {
   Dialog,
   DialogPanel,
@@ -94,9 +95,12 @@ export function SubstackContent({ html }: Props) {
                   </button>
 
                   {lightboxSrc && (
-                    <img
+                    <Image
                       src={lightboxSrc}
                       alt={lightboxAlt || 'Substack image'}
+                      width={1600}
+                      height={900}
+                      unoptimized
                       className="max-h-[90vh] max-w-[90vw] rounded-xl shadow-2xl"
                     />
                   )}
