@@ -1901,13 +1901,6 @@ function TimelineEventDetails({
       : isNoAction
         ? 'Next evaluation window'
       : 'Suggested next step'
-  const lightweightWhyLabel = isMonitorTuned
-    ? 'Why this looked like noise'
-    : isStandDown
-      ? 'Why no new action'
-      : isNoAction
-        ? 'Why no action was taken'
-      : 'Why this action happened'
   const lightweightOutcomeLabel = isMonitorTuned
     ? 'Next evaluation window'
     : isStandDown
@@ -1991,7 +1984,7 @@ function TimelineEventDetails({
           </p>
           <p className="mt-2 text-sm text-zinc-700 dark:text-zinc-300">
             {entry.decision?.reasoning ??
-              actionWhyDetail}
+              'The alert reproduced cleanly enough to require a reviewable fix path.'}
           </p>
         </div>
         <div className="rounded-xl border border-zinc-200/65 bg-zinc-50/80 p-3 dark:border-zinc-700/25 dark:bg-zinc-900/40">

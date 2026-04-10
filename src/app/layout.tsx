@@ -6,6 +6,8 @@ import { Providers } from '@/app/providers'
 
 import '@/styles/tailwind.css'
 
+const graphImageUrl = process.env.NEXT_PUBLIC_GRAPH_IMAGE_URL ?? '/graph-image.png'
+
 export const metadata: Metadata = {
   metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? 'http://localhost:3000'),
   title: 'Todo Agent',
@@ -15,14 +17,14 @@ export const metadata: Metadata = {
     title: 'Todo Agent',
     description:
       'A self-triaging todo system demo that detects task signals, explains triage decisions, and proposes follow-up actions.',
-    images: ['/graph-image.png'],
+    images: [graphImageUrl],
   },
   twitter: {
     card: 'summary_large_image',
     title: 'Todo Agent',
     description:
       'A self-triaging todo system demo that detects task signals, explains triage decisions, and proposes follow-up actions.',
-    images: ['/graph-image.png'],
+    images: [graphImageUrl],
   },
 }
 
