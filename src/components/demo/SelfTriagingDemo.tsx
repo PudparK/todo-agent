@@ -2480,7 +2480,7 @@ function TimelineLoadingRow({
 
 export function SelfTriagingDemo() {
   const initialSnapshot = useMemo(
-    () => buildDerivedSnapshot(cloneSnapshot(baseDemoSnapshot), 'initial'),
+    () => cloneSnapshot(baseDemoSnapshot),
     [],
   )
   const initialSignalId = useMemo(
@@ -3133,10 +3133,7 @@ export function SelfTriagingDemo() {
       return
     }
 
-    const nextSnapshot = buildDerivedSnapshot(
-      cloneSnapshot(baseDemoSnapshot),
-      'initial',
-    )
+    const nextSnapshot = cloneSnapshot(baseDemoSnapshot)
     const nextSelectedSignalId = getFirstSignalId(nextSnapshot)
 
     if (
@@ -3171,10 +3168,7 @@ export function SelfTriagingDemo() {
       return
     }
 
-    const nextSnapshot = buildDerivedSnapshot(
-      cloneSnapshot(weirdDemoSnapshot),
-      'initial',
-    )
+    const nextSnapshot = cloneSnapshot(weirdDemoSnapshot)
     const nextSelectedSignalId = getFirstSignalId(nextSnapshot)
     contextVersionRef.current += 1
     setAiTriageBySignalId(
